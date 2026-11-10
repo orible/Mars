@@ -1,0 +1,76 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<PageTitle>Mars observer</PageTitle>
+
+<header class="bar">
+    <h1>Mars observer</h1>
+    <input @bind="url" class="url" aria-label="Simulator WebSocket URL" />
+    <button @onclick="Connect">Connect</button>
+    <span class="status @state">@state</span>
+</header>
+
+<section class="summary">
+    <span>Body: <strong>@bodyName</strong> (rev @bodyRev)</span>
+    <span>Cylinders: <strong>@actuatorCount</strong></span>
+    <span>Mass: <strong>@mass.ToString("0.00") kg</strong></span>
+    <span>Sim time: <strong>@simTime.ToString("0.0") s</strong></span>
+</section>
+
+<canvas @ref="canvas" class="view" width="1100" height="560"></canvas>
+
+@code {
+    private ElementReference canvas;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<Home>? self;
+
+    private string url = "ws://localhost:8080/ws";
+    private string state = "idle";
+    private string bodyName = "–";
+    private int bodyRev;
+    private int actuatorCount;
+    private double mass;
+    private double simTime;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        module = await JS.InvokeAsync<IJSObjectReference>("import", "./observer.js");
+        self = DotNetObjectReference.Create(this);
+        await Connect();
+    }
+
+    private async Task Connect()
+    {
+        if (module is null || self is null) return;
+        await module.InvokeVoidAsync("connect", url, canvas, self);
+    }
+
+    [JSInvokable]
+    public void OnStatus(string connection, string body, int rev, int actuators, double bodyMass, double t)
+    {
+        state = connection;
+        bodyName = body;
+        bodyRev = rev;
+        actuatorCount = actuators;
+        mass = bodyMass;
+        simTime = t;
+        StateHasChanged();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (module is not null)
+        {
+            try
+            {
+                await module.InvokeVoidAsync("disconnect");
+                await module.DisposeAsync();
+            }
+            catch (JSDisconnectedException) { }
+        }
+        self?.Dispose();
+    }
+}

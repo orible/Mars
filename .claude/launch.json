@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "observer",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "observer", "--launch-profile", "http"],
+      "port": 5217
+    },
+    {
+      "name": "simserver",
+      "runtimeExecutable": "C:\\Program Files\\Go\\bin\\go.exe",
+      "runtimeArgs": ["-C", "sim", "run", "./cmd/simserver"],
+      "port": 8080
+    }
+  ]
+}

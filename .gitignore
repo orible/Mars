@@ -1,0 +1,15 @@
+# .NET
+bin/
+obj/
+.vs/
+*.user
+
+# Go
+/sim/simserver
+/sim/simserver.exe
+*.test
+*.out
+
+# Training artefacts
+/sim/checkpoints/
+/sim/runs/
