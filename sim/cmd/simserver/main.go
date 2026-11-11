@@ -106,6 +106,15 @@ type Frame struct {
 	StartLevel float64             `json:"startLevel"`
 	Follow     bool                `json:"follow"`
 	Training   *env.TrainingStatus `json:"training"`
+	// Human motion reference being tracked (getting up), if any.
+	Reference *RefFrame `json:"reference"`
+}
+
+type RefFrame struct {
+	Name     string  `json:"name"`
+	Progress float64 `json:"progress"` // 0..1 along the reference
+	ErrorDeg float64 `json:"errorDeg"` // rms joint-angle error to the nearest reference pose
+	Active   bool    `json:"active"`   // the robot is down, so the reference is being rewarded
 }
 
 // JointFrame is one joint's angle within its limits. Kind names the
@@ -167,6 +176,7 @@ type sim struct {
 	// trainer's status file while following training.
 	switches <-chan env.Scenario
 	ctl      *control
+	motion   *env.MotionTracker // the scenario's human reference on this body
 }
 
 // control is the scenario state shared with the HTTP endpoints and the
@@ -324,6 +334,12 @@ func (s *sim) restart() {
 	s.fallenAt = -1
 	s.up = true
 	s.newWorld(geom.V3{})
+	s.motion = nil
+	if s.scen.Reference != "" {
+		if ref, err := env.LoadReference(s.scen.Reference); err == nil {
+			s.motion = env.NewMotionTracker(ref, s.world.M)
+		}
+	}
 	if s.floating && s.rng.Float64() < s.scen.LyingFrac {
 		env.FloorStart(s.world, s.rng, s.scen.StartLevel)
 		if !s.world.Upright() {
@@ -398,6 +414,10 @@ func (s *sim) frame() Frame {
 	}
 	f.Scenario, f.StartLevel = s.scen.Name, s.scen.StartLevel
 	f.Follow, f.Training = s.ctl.get()
+	if s.motion != nil && w.Floating {
+		s.motion.Update(w, imu.Pitch)
+		f.Reference = &RefFrame{Name: s.motion.Ref.Name, Progress: s.motion.Progress, ErrorDeg: s.motion.Error * 180 / math.Pi, Active: !s.up}
+	}
 	if o, ok := s.tracker.Objective(); ok {
 		f.Objective = &o
 	}

@@ -57,6 +57,12 @@ type Env struct {
 	feet    []foot
 	up      bool    // upright at the last step
 	prevPot float64 // get-up shaping potential at the last step
+
+	// Motion is the human reference being tracked while getting up (nil
+	// if the scenario has none or the body has no recognisable legs).
+	Motion       *MotionTracker
+	ref          *Reference
+	prevProgress float64
 }
 
 // foot is a link that carries the lowest contact points; stepping is
@@ -69,6 +75,11 @@ type foot struct {
 
 func New(base body.Body, cfg Scenario, seed int64) *Env {
 	e := &Env{Cfg: cfg, Base: base, rng: rand.New(rand.NewSource(seed))}
+	if cfg.Reference != "" {
+		if r, err := LoadReference(cfg.Reference); err == nil { // validated with the scenario
+			e.ref = &r
+		}
+	}
 	e.Loop = command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, e.rng)
 	e.Reset()
 	return e
@@ -104,6 +115,14 @@ func (e *Env) Reset() {
 	}
 	e.prevP = e.W.Base.P
 	e.up = e.W.Upright()
+	e.Motion = nil
+	if e.ref != nil {
+		e.Motion = NewMotionTracker(*e.ref, m)
+	}
+	e.track()
+	if e.Motion != nil {
+		e.prevProgress = e.Motion.Progress
+	}
 	// A shallow crouch already counts as up; only starts that are really
 	// down count as floor starts for the get-up statistics.
 	e.StartedLying = !e.up
@@ -202,6 +221,7 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 		up = true // stumbling but not down: still counts as up
 	}
 	e.up = up
+	e.track()
 	if up {
 		r = e.upReward(valves)
 	} else {
@@ -222,14 +242,30 @@ func (e *Env) potential() float64 {
 	return 0.5*h + 0.5*math.Max(0, e.W.Up()[1])
 }
 
+// track measures the pose against the human reference, if any.
+func (e *Env) track() {
+	if e.Motion != nil {
+		e.Motion.Update(e.W, obs.ReadIMU(e.W).Pitch)
+	}
+}
+
 // downReward: on the floor. Being down pays little; getting higher and
 // more upright pays as it happens (potential-based shaping, so it cannot
-// be farmed by bobbing up and down), and standing pays far more.
+// be farmed by bobbing up and down), and standing pays far more. With a
+// human reference, moving like the human (close to the reference path)
+// and along it (progress towards standing) pays too, still capped below
+// the least that being up pays.
 func (e *Env) downReward(valves []float64) float64 {
 	pot := e.potential()
 	shaping := 2 * (pot - e.prevPot)
 	e.prevPot = pot
-	return 0.1*pot + shaping - 0.02*effort(valves)
+	r := 0.1*pot + shaping - 0.02*effort(valves)
+	if m := e.Motion; m != nil {
+		close := math.Exp(-m.Error * m.Error / 0.09) // ~17° rms error halves it
+		r += 0.08*close + 1.0*close*(m.Progress-e.prevProgress)
+		e.prevProgress = m.Progress
+	}
+	return r
 }
 
 // upReward: stay upright at a sensible height without thrashing the
@@ -239,6 +275,9 @@ func (e *Env) downReward(valves []float64) float64 {
 func (e *Env) upReward(valves []float64) float64 {
 	w := e.W
 	e.prevPot = e.potential()
+	if e.Motion != nil {
+		e.prevProgress = e.Motion.Progress
+	}
 	tilt := 1 - w.Up()[1]
 	height := math.Abs(w.Base.P[1]/e.h0 - 1)
 	upright := math.Exp(-(10*tilt + 5*height + 0.1*w.Base.W.Norm() + 0.2*effort(valves)))

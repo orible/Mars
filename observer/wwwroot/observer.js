@@ -185,6 +185,13 @@ function draw(canvas, f) {
 
   ctx.fillStyle = css("--muted-text");
   const deg = (r) => (r * 180 / Math.PI).toFixed(1);
+  if (f.reference) {
+    // Human motion reference tracker: how far along it the pose is, and how far off.
+    const r = f.reference, x = 600, y = H - 66, w = 200;
+    ctx.fillStyle = css("--muted-text");
+    ctx.fillText(`human reference "${r.name}"${r.active ? "" : " (up: not rewarded)"}: ${Math.round(100 * r.progress)}% along, ${r.errorDeg.toFixed(0)}° off`, x, y - 4);
+    bar(ctx, x, y, w, 6, r.progress, r.active ? css("--accent") : css("--muted-text"));
+  }
   if (f.prompt) {
     const c = f.command || { heading_deg: 0, speed: 0 };
     ctx.fillStyle = css("--text");
@@ -197,7 +204,7 @@ function draw(canvas, f) {
     : "test stand (pelvis fixed)", 40, H - 12);
 
   // Right: one row per cylinder — stroke, chamber pressures, valve command.
-  const left = 590, rowH = Math.min(44, (H - 60) / Math.max(1, f.cylinders.length));
+  const left = 590, rowH = Math.min(44, 340 / Math.max(1, f.cylinders.length)); // rows end above the top view
   ctx.fillStyle = css("--muted-text");
   ctx.fillText("stroke", left + 90, 24);
   ctx.fillText("P_A / P_B (of supply)", left + 230, 24);

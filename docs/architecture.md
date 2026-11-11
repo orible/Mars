@@ -183,6 +183,13 @@ Most world-model basics are learned in simulation; real hardware only receives p
   - **Strength:** the quads straighten the knees under the full weight and lift the pelvis to 91% of standing height.
   - **Balance:** this is the hard part. The squat already uses the hip's 90° flexion and the ankle's 20° dorsiflexion limits, so there is little range left to keep the weight over the feet on the way up. Humans have about 120° and 35–40°. A hand-written controller rises and then sits back down.
   - **If training cannot find a way,** the hardware answer is more hip flexion and ankle dorsiflexion range.
+- **Following a human: motion references.** A reference is a human movement written as keyframes of trunk lean and hip, knee and ankle angles, with sources. Each one is a JSON file in `sim/env/references`.
+  - **Squat-to-stand** comes from the sit-to-stand literature: flexion-momentum, momentum transfer (seat-off), then extension.
+  - **Retargeting:** each body gets its own version, clipped to its joint limits, with joint roles found from link names.
+  - **Tracking is state-based:** each step finds the nearest point on the reference path. While down, being close to the human pose and moving along the path towards standing both pay, capped below what being up pays.
+  - **No new network inputs,** so references can be added without retraining from scratch.
+  - **The balanced squat start matches the human at about seat-off** (64% along, 12° rms off), so the reference mainly teaches the extension phase.
+  - **Gap:** no published kinematics for rising from kneeling or lying without hands were found, so those rungs have no reference yet. A motion-capture clip (CMU or AMASS floor-rise recordings) would fill it.
 - **Scenarios** (`-scenario` on the trainer and the sim server) choose the mix:
   - `getup`: always start on the floor.
   - `stand`: stand through pushes.

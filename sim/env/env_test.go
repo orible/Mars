@@ -140,6 +140,35 @@ func TestSquatToStandStrength(t *testing.T) {
 	}
 }
 
+// The squat-to-stand reference should read standing as its end, and the
+// balanced squat start (trunk leaning ~45°, hips at their 90° limit) as
+// the human at about seat-off, with the extension phase still to come.
+func TestSquatToStandReference(t *testing.T) {
+	ref, err := LoadReference("squat-to-stand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc, _ := LoadScenario("getup")
+	sc.RandomBodyFrac = 0
+	e := New(biped(t), sc, 1)
+	tr := NewMotionTracker(ref, e.W.M)
+	if tr == nil || len(tr.legs) != 2 {
+		t.Fatalf("expected two legs to track, got %v", tr)
+	}
+	stand := model.NewWorld(e.W.M, true)
+	tr.Update(stand, 0)
+	t.Logf("standing: progress %.2f, error %.1f deg", tr.Progress, tr.Error*180/math.Pi)
+	if tr.Progress < 0.95 || tr.Error > 0.05 {
+		t.Errorf("standing should be the end of the reference")
+	}
+	floorPose(e.W, rand.New(rand.NewSource(2)), 0)
+	tr.Update(e.W, -math.Asin(e.W.Up()[0]))
+	t.Logf("squat start: progress %.2f, error %.1f deg", tr.Progress, tr.Error*180/math.Pi)
+	if tr.Progress < 0.3 || tr.Progress > 0.8 || tr.Error > 20*math.Pi/180 {
+		t.Errorf("the squat start should match the human around seat-off, got progress %.2f, error %.1f deg", tr.Progress, tr.Error*180/math.Pi)
+	}
+}
+
 // Each rung of the floor-start ladder should settle at rest without
 // blowing up; squatting, kneeling, sitting and lying all count as down.
 func TestFloorStartLadder(t *testing.T) {

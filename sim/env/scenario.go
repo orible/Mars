@@ -33,6 +33,9 @@ type Scenario struct {
 	// get-ups succeed and back down if they stop.
 	StartLevel float64 `json:"startLevel"`
 	Curriculum bool    `json:"curriculum"`
+	// Reference is a human motion to imitate while getting up (a
+	// built-in name from env/references, or a .json file); "" for none.
+	Reference string `json:"reference"`
 
 	RandomBodyFrac float64    `json:"randomBodyFrac"` // fraction of episodes on a random body instead of the base spec
 	EpisodeSeconds float64    `json:"episodeSeconds"`
@@ -56,7 +59,7 @@ func flatWorld() world.RandomConfig {
 var Scenarios = map[string]Scenario{
 	"getup": {
 		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
-		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true,
+		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: "squat-to-stand",
 		RandomBodyFrac: 0.5, EpisodeSeconds: 10,
 	},
 	"stand": {
@@ -72,7 +75,7 @@ var Scenarios = map[string]Scenario{
 	},
 	"life": {
 		Description: "everything at once: start on the floor or standing, get up, walk where told, get pushed, fall and get back up",
-		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false, StartLevel: 1,
+		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false, StartLevel: 1, Reference: "squat-to-stand",
 		RandomBodyFrac: 0.5, EpisodeSeconds: 15, PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3},
 		Assist: 0.5, UnassistedFrac: 0.3,
 	},
@@ -122,6 +125,8 @@ func ListScenarios(dir string) []ScenarioInfo {
 	}
 	return out
 }
+
+func referenceOK(s string) bool { _, err := LoadReference(s); return err == nil }
 
 // ScenarioNames lists the built-ins.
 func ScenarioNames() []string {
@@ -183,6 +188,8 @@ func (s Scenario) Validate() error {
 		return fmt.Errorf("scenario %q: world needs count ≥ 1, arrive > 0 and a friction range", s.Name)
 	case s.PushEvery < 0 || s.PushSpeed[1] < s.PushSpeed[0]:
 		return fmt.Errorf("scenario %q: bad push settings", s.Name)
+	case s.Reference != "" && !referenceOK(s.Reference):
+		return fmt.Errorf("scenario %q: cannot load reference %q", s.Name, s.Reference)
 	case math.IsNaN(s.EpisodeSeconds):
 		return fmt.Errorf("scenario %q: episodeSeconds is not a number", s.Name)
 	}

@@ -1,0 +1,19 @@
+{
+  "name": "squat-to-stand",
+  "description": "Human rising from a seat or deep squat without using the hands: lean the trunk forward and flex the hips further (flexion-momentum), shift the weight over the feet with hip flexion and ankle dorsiflexion at their peaks (momentum transfer, seat-off), then extend hips and knees together while the ankle comes back (extension).",
+  "sources": [
+    "Phase timing 0-33-66-100% and start angles hip ~88 deg, knee ~98 deg, ankle dorsiflexion peak ~18 deg: https://arxiv.org/pdf/2604.03766",
+    "Lift-off angles hip 87.7, knee 105.1 deg; peak hip flexion and dorsiflexion in momentum transfer: https://pmc.ncbi.nlm.nih.gov/articles/PMC1929086",
+    "Peak trunk flexion ~59 deg at seat-off (full-flexion strategy): summarised from the sit-to-stand literature search, see docs/architecture.md",
+    "Intermediate keyframes are interpolated by hand between these published values; they are a reference shape, not a measured trajectory."
+  ],
+  "units": "degrees; trunkLean forward, hip flexion, knee flexion, ankle dorsiflexion are positive",
+  "keyframes": [
+    { "t": 0.00, "trunkLean": 15, "hip": 88,  "knee": 98, "ankle": 10 },
+    { "t": 0.33, "trunkLean": 50, "hip": 105, "knee": 95, "ankle": 16 },
+    { "t": 0.50, "trunkLean": 58, "hip": 100, "knee": 90, "ankle": 18 },
+    { "t": 0.66, "trunkLean": 35, "hip": 70,  "knee": 60, "ankle": 15 },
+    { "t": 0.85, "trunkLean": 12, "hip": 25,  "knee": 20, "ankle": 6 },
+    { "t": 1.00, "trunkLean": 0,  "hip": 0,   "knee": 0,  "ankle": 0 }
+  ]
+}

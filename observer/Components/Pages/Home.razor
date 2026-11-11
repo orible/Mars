@@ -40,7 +40,7 @@
 </section>
 <p class="watching">Watching <strong>@watching</strong>@(following ? " (following training)" : "") · @trainingLine</p>
 
-<canvas @ref="canvas" class="view" width="1100" height="720"></canvas>
+<canvas @ref="canvas" class="view" width="1100" height="770"></canvas>
 
 @code {
     private static readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(3) };
