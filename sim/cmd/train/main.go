@@ -51,6 +51,8 @@ func writeJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
+const csvHeader = "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level"
+
 // scenarioFile returns the scenario argument if it is a file, made
 // absolute so another process can load it.
 func scenarioFile(arg string) string {
@@ -140,13 +142,21 @@ func main() {
 	if err := os.MkdirAll(filepath.Dir(*logPath), 0o755); err != nil {
 		log.Fatal(err)
 	}
+	// A log written with different columns is moved aside, not appended to.
+	if old, err := os.ReadFile(*logPath); err == nil && len(old) > 0 && !strings.HasPrefix(string(old), csvHeader+"\n") {
+		aside := strings.TrimSuffix(*logPath, ".csv") + time.Now().Format("-20060102-150405") + ".csv"
+		if err := os.Rename(*logPath, aside); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("%s had different columns; moved it to %s", *logPath, aside)
+	}
 	csv, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer csv.Close()
 	if info, _ := csv.Stat(); info.Size() == 0 {
-		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level")
+		fmt.Fprintln(csv, csvHeader)
 	}
 
 	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s and %s",
