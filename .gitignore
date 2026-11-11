@@ -10,9 +10,10 @@ obj/
 *.test
 *.out
 
-# Training artefacts
+# Training artefacts (live; snapshot them into training/ with setup -Save)
 /sim/checkpoints/
 /sim/runs/
+/sim/bin/
 *.log
 
 # Downloaded motion capture (CMU); only extracted references are committed
