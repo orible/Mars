@@ -19,22 +19,26 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 
 	"mars/sim/body"
+	"mars/sim/command"
 	"mars/sim/env"
 	"mars/sim/geom"
 	"mars/sim/model"
 	"mars/sim/obs"
 	"mars/sim/policy"
+	"mars/sim/world"
 )
 
 // Timing matches training (package env): 50 µs physics, 1 kHz control
@@ -80,6 +84,7 @@ type Frame struct {
 	Mass      float64        `json:"mass"`
 	CoG       geom.V3        `json:"cog"`
 	Pelvis    geom.V3        `json:"pelvis"`
+	Yaw       float64        `json:"yaw"` // rad, heading about up (0 = +x, positive turns left)
 	Pitch     float64        `json:"pitch"`
 	Roll      float64        `json:"roll"`
 	Falls     int            `json:"falls"`
@@ -87,9 +92,31 @@ type Frame struct {
 	Links     []LinkFrame    `json:"links"`
 	Cylinders []CylFrame     `json:"cylinders"`
 	Contacts  []ContactFrame `json:"contacts"`
+	// Command loop: what the LLM (or its stand-in) was told and said.
+	Objective *world.XZ       `json:"objective"`
+	Reached   int             `json:"reached"`
+	Prompt    string          `json:"prompt"`
+	Command   command.Command `json:"command"`
+	Commander string          `json:"commander"`
+}
+
+// llmLink is the state shared with the HTTP endpoints an outside LLM
+// uses: it reads the perception and posts commands.
+type llmLink struct {
+	mu         sync.Mutex
+	perception command.Perception
+	prompt     string
+	posted     *command.Command // latest command from outside, not yet applied
 }
 
 type sim struct {
+	tracker  *world.Tracker
+	worldCfg *world.World // nil: random worlds
+	loop     *command.Loop
+	external bool // commands come from POST /command instead of the scripted stand-in
+	llm      *llmLink
+	cmd      command.Command
+
 	world    *model.World
 	rev      int
 	pol      *policy.SetPolicy
@@ -113,6 +140,7 @@ func (s *sim) reset(b body.Body) error {
 	}
 	s.world = model.NewWorld(m, s.floating)
 	s.fallenAt = -1
+	s.newWorld(geom.V3{})
 	s.rev++
 	limited := 0
 	for _, r := range m.Reach(200) {
@@ -133,7 +161,8 @@ func (s *sim) control() {
 	default:
 	}
 	if !s.hold && s.tick%env.PolicyEvery == 0 {
-		tokens, global := obs.Build(w, obs.ReadIMU(w), geom.V3{})
+		s.command()
+		tokens, global := obs.Build(w, obs.ReadIMU(w), s.cmd)
 		copy(w.Cmd, s.pol.Act(tokens, global))
 	}
 	s.tick++
@@ -158,12 +187,55 @@ func (s *sim) control() {
 	}
 }
 
-// restart puts the same body back in the neutral pose, keeping sim time.
+// restart puts the same body back in the neutral pose at the origin,
+// keeping sim time, and restarts the world's objectives.
 func (s *sim) restart() {
 	t := s.world.T
 	s.world = model.NewWorld(s.world.M, s.floating)
 	s.world.T = t
 	s.fallenAt = -1
+	s.newWorld(geom.V3{})
+}
+
+// newWorld starts the objectives again: the -world file, or a fresh random
+// chain laid out from the robot's current position.
+func (s *sim) newWorld(from geom.V3) {
+	var wl world.World
+	if s.worldCfg != nil {
+		wl = *s.worldCfg
+	} else {
+		wl = world.Random(s.rng, world.DefaultRandom())
+		for i := range wl.Objectives {
+			wl.Objectives[i][0] += from[0]
+			wl.Objectives[i][1] += from[2]
+		}
+	}
+	s.world.Ground.Mu = wl.Friction
+	s.tracker = world.NewTracker(wl)
+	s.loop.Reset(s.world.T)
+	s.cmd = command.Stop
+}
+
+// command runs one turn of the perception → LLM → command loop.
+func (s *sim) command() {
+	w := s.world
+	p := s.tracker.Perceive(w.T, w.Base.P, w.Base.R, s.fallenAt >= 0)
+	if p.Objectives == 0 && s.worldCfg == nil {
+		s.newWorld(w.Base.P) // random worlds go on forever
+		p = s.tracker.Perceive(w.T, w.Base.P, w.Base.R, s.fallenAt >= 0)
+	}
+	s.llm.mu.Lock()
+	s.llm.perception, s.llm.prompt = p, p.Prompt()
+	posted := s.llm.posted
+	s.llm.posted = nil
+	s.llm.mu.Unlock()
+	if s.external {
+		if posted != nil {
+			s.cmd = *posted
+		}
+	} else {
+		s.cmd = s.loop.Update(w.T, p)
+	}
 }
 
 func (s *sim) frame() Frame {
@@ -172,8 +244,17 @@ func (s *sim) frame() Frame {
 	cog, mass := w.CoG()
 	imu := obs.ReadIMU(w)
 	f := Frame{T: w.T, BodyName: m.Body.Name, BodyRev: s.rev, Floating: w.Floating, Mass: mass, CoG: cog,
-		Pelvis: w.Base.P, Pitch: imu.Pitch, Roll: imu.Roll, Falls: s.falls, Supply: m.Supply.Pressure,
-		Contacts: []ContactFrame{}}
+		Pelvis: w.Base.P, Yaw: math.Atan2(-w.Base.R[2][0], w.Base.R[0][0]), Pitch: imu.Pitch, Roll: imu.Roll, Falls: s.falls, Supply: m.Supply.Pressure,
+		Contacts: []ContactFrame{}, Reached: s.tracker.Reached, Command: s.cmd, Commander: "scripted"}
+	if s.external {
+		f.Commander = "external (POST /command)"
+	}
+	if o, ok := s.tracker.Objective(); ok {
+		f.Objective = &o
+	}
+	s.llm.mu.Lock()
+	f.Prompt = s.llm.prompt
+	s.llm.mu.Unlock()
 	for i, c := range m.Contacts {
 		f.Contacts = append(f.Contacts, ContactFrame{P: m.Point(w.Pose, c.Link, c.Point), F: w.ContactF[i]})
 	}
@@ -301,7 +382,21 @@ func main() {
 	hold := flag.Bool("hold", false, "close every valve (cylinders lock the joints) instead of running the policy")
 	push := flag.Float64("push", 0, "if > 0, push the robot sideways (0.1–0.4 m/s) on average every this many seconds, as in training")
 	speed := flag.Float64("speed", 1, "simulated seconds per wall-clock second; 0 = as fast as one core allows (the trainer always runs flat out on every core)")
+	worldPath := flag.String("world", "", "world file (objectives, friction); random worlds if empty")
+	commander := flag.String("commander", "scripted", "who issues walking commands: scripted (the training stand-in for the LLM) or external (an LLM reading GET /perception and posting to /command)")
 	flag.Parse()
+	if *commander != "scripted" && *commander != "external" {
+		log.Fatalf("-commander must be scripted or external, not %q", *commander)
+	}
+	var worldCfg *world.World
+	if *worldPath != "" {
+		wl, err := world.Load(*worldPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		worldCfg = &wl
+	}
+	link := &llmLink{}
 
 	if *checkOnly {
 		check(*bodyPath)
@@ -335,7 +430,9 @@ func main() {
 
 	var latest atomic.Pointer[[]byte]
 	go func() {
-		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng}
+		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng,
+			worldCfg: worldCfg, external: *commander == "external", llm: link,
+			loop: command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, rng)}
 		for s.world == nil {
 			if err := s.reset(<-bodies); err != nil {
 				log.Printf("body rejected: %v", err)
@@ -403,6 +500,45 @@ func main() {
 		}
 	})
 
+	// The LLM loop over HTTP: read what the robot perceives, reply with a
+	// command. Only applied with -commander external.
+	http.HandleFunc("/perception", func(w http.ResponseWriter, r *http.Request) {
+		link.mu.Lock()
+		body := struct {
+			Perception command.Perception `json:"perception"`
+			Prompt     string             `json:"prompt"`
+		}{link.perception, link.prompt}
+		link.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(body)
+	})
+	http.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST a JSON command", http.StatusMethodNotAllowed)
+			return
+		}
+		if *commander != "external" {
+			http.Error(w, "the scripted commander is in charge; restart with -commander external", http.StatusConflict)
+			return
+		}
+		data, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		c, err := command.Parse(string(data))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		link.mu.Lock()
+		link.posted = &c
+		link.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(c)
+	})
+
+	log.Printf("commander: %s; LLM loop at http://%s/perception and POST http://%s/command", *commander, *addr, *addr)
 	log.Printf("streaming on ws://%s/ws", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }

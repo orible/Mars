@@ -15,6 +15,7 @@ import (
 	"math"
 	"sort"
 
+	"mars/sim/command"
 	"mars/sim/geom"
 	"mars/sim/model"
 )
@@ -22,7 +23,7 @@ import (
 // Feature sizes. Changing them invalidates checkpoints.
 const (
 	TokenDim  = 15
-	GlobalDim = 12
+	GlobalDim = 13
 	// MaxArms is how many of a cylinder's moment arms (largest first) go
 	// into its token. A graph network over links, joints and cylinders
 	// will remove this cap.
@@ -66,8 +67,9 @@ func heading(w *model.World) geom.M3 {
 }
 
 // Build returns the per-cylinder tokens and the global feature vector.
-// goal is the commanded target in the robot's own frame (x forward, z right).
-func Build(w *model.World, imu IMU, goal geom.V3) ([][]float64, []float64) {
+// cmd is the current command from the LLM loop; it is the network's only
+// knowledge of where to go.
+func Build(w *model.World, imu IMU, cmd command.Command) ([][]float64, []float64) {
 	m := w.M
 	h := heading(w)
 	cogW, mass := w.CoG()
@@ -101,7 +103,7 @@ func Build(w *model.World, imu IMU, goal geom.V3) ([][]float64, []float64) {
 		cog[0] / lengthScale, cog[1] / lengthScale, cog[2] / lengthScale,
 		imu.Pitch, imu.Roll,
 		imu.Gyro[0] / gyroScale, imu.Gyro[1] / gyroScale, imu.Gyro[2] / gyroScale,
-		goal[0], goal[2],
+		math.Cos(cmd.HeadingDeg * math.Pi / 180), math.Sin(cmd.HeadingDeg * math.Pi / 180), cmd.Speed / command.MaxSpeed,
 		float64(len(m.Cyl)) / countScale,
 	}
 	return tokens, global

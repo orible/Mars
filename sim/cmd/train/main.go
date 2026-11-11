@@ -1,11 +1,13 @@
-// Command train runs PPO on the standing task: the biped spec plus random
-// bodies (cylinder count, anchors, CoG), random floor friction and random
-// pushes. It writes the policy checkpoint after every iteration (atomic
-// rename), so a sim server started with -policy on the same file shows
-// the latest weights while training runs.
+// Command train runs PPO for the movement network across the biped spec
+// and random bodies (cylinder count, anchors, CoG), random floor friction
+// and random pushes. Tasks: stand (the stop command) and walk (follow the
+// commands a scripted stand-in for the LLM loop issues while heading for
+// random objectives). It writes the policy checkpoint after every
+// iteration (atomic rename), so a sim server started with -policy on the
+// same file shows the latest weights while training runs.
 //
-//	go run ./cmd/train -iters 300
-//	go run ./cmd/simserver -policy checkpoints/stand.json
+//	go run ./cmd/train -task walk -out checkpoints/walk.json -log runs/walk.csv
+//	go run ./cmd/simserver -policy checkpoints/walk.json
 package main
 
 import (
@@ -55,6 +57,7 @@ func readJSON(path string, v any) error {
 func main() {
 	cfg := ppo.Defaults()
 	bodyPath := flag.String("body", "bodies/biped.json", "base body spec")
+	task := flag.String("task", "walk", "stand (always the stop command) or walk (follow the scripted LLM stand-in towards random objectives)")
 	out := flag.String("out", "checkpoints/stand.json", "policy checkpoint (value network goes next to it)")
 	resume := flag.Bool("resume", false, "continue from -out and its value network")
 	iters := flag.Int("iters", 300, "PPO iterations")
@@ -90,7 +93,15 @@ func main() {
 		log.Fatalf("checkpoint features %d/%d, simulator provides %d/%d", pol.TokenDim, pol.GlobalDim, obs.TokenDim, obs.GlobalDim)
 	}
 
-	ecfg := env.DefaultStand()
+	var ecfg env.Config
+	switch *task {
+	case "stand":
+		ecfg = env.DefaultStand()
+	case "walk":
+		ecfg = env.DefaultWalk()
+	default:
+		log.Fatalf("-task must be stand or walk, not %q", *task)
+	}
 	ecfg.RandomBodyFrac = *randomFrac
 	envs := make([]*env.Env, cfg.Envs)
 	for i := range envs {

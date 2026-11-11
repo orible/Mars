@@ -155,8 +155,17 @@ function draw(canvas, f) {
     }
   }
 
+  if (floating) drawTopDown(ctx, f);
+
   ctx.fillStyle = css("--muted-text");
   const deg = (r) => (r * 180 / Math.PI).toFixed(1);
+  if (f.prompt) {
+    const c = f.command || { heading_deg: 0, speed: 0 };
+    ctx.fillStyle = css("--text");
+    ctx.fillText(`LLM sees: ${f.prompt.split(". Reply")[0]}.`, 40, H - 48);
+    ctx.fillText(`Command (${f.commander}): heading ${c.heading_deg.toFixed(0)}°, speed ${c.speed.toFixed(2)} m/s · objectives reached ${f.reached || 0}`, 40, H - 30);
+    ctx.fillStyle = css("--muted-text");
+  }
   ctx.fillText(floating
     ? `pelvis height ${(pelvis[1] * 100).toFixed(1)} cm · pitch ${deg(f.pitch || 0)}° · roll ${deg(f.roll || 0)}° · falls ${f.falls || 0}`
     : "test stand (pelvis fixed)", 40, H - 12);
@@ -176,6 +185,55 @@ function draw(canvas, f) {
     bar(ctx, left + 230, y + 8, 150, 6, c.pB / f.supply, css("--press-b"));
     centred(ctx, left + 400, y, 100, 14, c.cmd);
   });
+}
+
+// Top-down inset for the human watching: robot, heading, trail, objective.
+// The robot itself never gets this map; it only receives commands.
+const trail = [];
+function drawTopDown(ctx, f) {
+  const x0 = 600, y0 = 400, w = 470, h = 120, cx = x0 + w / 2, cy = y0 + h / 2, s = 22; // px per metre
+  ctx.save();
+  ctx.fillStyle = css("--muted-text");
+  ctx.fillText("top view (observer only, not given to the robot)", x0, y0 - 6);
+  ctx.strokeStyle = css("--grid");
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0, y0, w, h);
+  ctx.beginPath(); ctx.rect(x0, y0, w, h); ctx.clip();
+  const p = f.pelvis;
+  // Screen: x forward to the right, z (robot's right) downwards.
+  const at = (x, z) => [cx + (x - p[0]) * s, cy + (z - p[2]) * s];
+  const last = trail[trail.length - 1];
+  if (!last || Math.hypot(last[0] - p[0], last[1] - p[2]) > 0.05) trail.push([p[0], p[2]]);
+  if (last && Math.hypot(last[0] - p[0], last[1] - p[2]) > 2) trail.length = 0; // reset after a restart
+  if (trail.length > 400) trail.shift();
+  ctx.strokeStyle = css("--muted");
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  trail.forEach(([x, z], i) => { const q = at(x, z); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+  ctx.stroke();
+  if (f.objective) {
+    let [ox, oy] = at(f.objective[0], f.objective[1]);
+    ox = Math.max(x0 + 6, Math.min(x0 + w - 6, ox));
+    oy = Math.max(y0 + 6, Math.min(y0 + h - 6, oy));
+    ctx.fillStyle = css("--warn");
+    dot(ctx, [ox, oy], 6);
+  }
+  // Robot heading: yaw is about +y, so forward is (cos, -sin) in (x, z).
+  const fx = Math.cos(f.yaw || 0), fz = -Math.sin(f.yaw || 0);
+  ctx.strokeStyle = css("--text");
+  ctx.fillStyle = css("--text");
+  dot(ctx, [cx, cy], 4);
+  line(ctx, [cx, cy], [cx + fx * 18, cy + fz * 18]);
+  // Commanded direction, relative to heading (positive right).
+  const c = f.command;
+  if (c && c.speed > 0) {
+    const a = (c.heading_deg * Math.PI) / 180;
+    const dx = fx * Math.cos(a) - fz * Math.sin(a), dz = fz * Math.cos(a) + fx * Math.sin(a);
+    ctx.strokeStyle = css("--accent");
+    ctx.lineWidth = 3;
+    line(ctx, [cx, cy], [cx + dx * 40 * (c.speed / 0.5), cy + dz * 40 * (c.speed / 0.5)]);
+  }
+  ctx.restore();
 }
 
 function line(ctx, a, b) {

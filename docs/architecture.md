@@ -140,11 +140,16 @@ Most world-model basics are learned in simulation; real hardware only receives p
 **Worlds and navigation: walk to the horizon, no map.** Humans head for an objective they can see or know the direction of, and deal with obstacles as they meet them. They remember what they have seen (object permanence) but do not carry a global map. The walking stack is built the same way:
 
 - **Loadable worlds.** A world is a data file, like a body spec. It holds the ground and, later, obstacles and regions with their own friction, plus one objective: a far-off point. The trainer generates random worlds; hand-made ones are for tests and demos. The sim server and the trainer both take a world file.
-- **Egocentric objective.** The network never sees world coordinates. It gets the objective's bearing in its own heading frame, plus how near it is, squashed so a far objective just reads as "far". Its only instruction is to walk that way until the objective grows near.
+- **The objective is perceived by the LLM loop, not known to the legs.** The movement network has no innate sense of objectives or paths. It only follows the current command: a heading relative to where it faces, and a speed, where 0 means stand. Seeing the objective and deciding where to go is the fast LLM layer's job, and it runs as a slow input/output loop:
+  - **Input:** a perception message, e.g. "The objective is about 4.8 m away, 22° to your left." In the sim it is computed from the world; on hardware it comes from the camera.
+  - **Output:** a JSON command, e.g. `{"heading_deg": -22, "speed": 0.3}`.
+  - **Repeat:** the robot moves, the view changes, the LLM looks again.
+
+  In training, a scripted commander (`command.Scripted` inside `command.Loop`) stands in for the LLM. It looks every 0.5–1.5 s, answers after 0.2–0.8 s, misjudges angles (±8°) and distances (±15%), and slows down as the objective grows near. The movement network is therefore rewarded only for tracking the commanded velocity while upright; standing is the stop command. The sim server exposes the same loop (`GET /perception`, `POST /command`, `-commander external`), so a real LLM can drive it.
 - **First-person perception, added later.** Depth rays from a head-mounted viewpoint, matching the real depth camera, enter as another set of tokens, so the ray count can change too. No map is ever passed in.
 - **Object permanence, added later.** A recurrent memory (GRU) in the policy carries what was seen. An obstacle that has dropped out of view, such as a box now underfoot or behind, is still accounted for.
 - **Stages:**
-  1. Flat world, walk toward the objective until near; random objective directions and distances.
+  1. Flat world, walk where the LLM loop says until the objective grows near; random objective directions and distances (in training now).
   2. Obstacles and terrain, with collision against the contact points.
   3. Depth rays.
   4. Memory.

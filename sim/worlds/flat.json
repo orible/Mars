@@ -1,0 +1,6 @@
+{
+  "name": "flat",
+  "friction": 0.8,
+  "arriveRadius": 0.4,
+  "objectives": [[4, 0], [4, 3], [0, 3], [0, 0]]
+}
