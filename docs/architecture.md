@@ -41,11 +41,13 @@ The sim is 3D from the start, because much of what makes the pelvis matter is 3D
 
   | Joint | Biped | Human chart | Walking uses |
   |---|---|---|---|
+  | Hip yaw | 40° internal .. 45° external rotation | about 35–45° in, 45–50° out | turning, and toeing in or out |
   | Hip roll | 30° adduction .. 45° abduction | same | small |
   | Hip pitch | −20° .. 90° | −20° .. 120° | about −10° .. 30° |
   | Knee | 3° hyperextension lock .. 90° flexion | 0 .. 135° | about 0 .. 60° |
   | Ankle | 45° plantar .. 20° dorsi | same | about 20° plantar .. 10° dorsi |
 
+  - **Hip yaw comes first in the chain** (pelvis → yaw → roll → pitch). The yaw link is a bracket that carries the roll and pitch cylinders' bases, so turning a leg never stretches them. A horizontal cylinder from the back of the pelvis to a lever on the bracket gives the full yaw range with a 25 mm minimum lever arm (about 11 N·m).
   - **Muscle placement is anatomical.** The knee cylinder is a "quad" down the front of the thigh to the front of the shin. The ankle cylinder is a "calf" down the back of the shin to the heel.
   - **Knee depth limit.** A straight quad loses its lever beyond about 90° of knee flexion. Humans keep it with the kneecap, which works as a pulley; a kneecap-style linkage would be the way to reach 110–135°.
   - **Knees lock.** Joint limits are stiff mechanical stops, and the knee's stop sits 3° past straight. On a straight leg the weight pushes the knee into the stop, so standing needs no knee cylinder force, like the human screw-home lock.

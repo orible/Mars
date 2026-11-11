@@ -173,8 +173,8 @@ func rodInertia(m, l float64) geom.V3 {
 
 // Random draws a biped for morphology randomisation: pelvis width and hip
 // drop, segment lengths, masses, payload CoG, supply, cylinder sizes and
-// anchor points all vary; some bodies get a second knee cylinder and some
-// lose their hip-roll cylinders.
+// anchor points all vary; some bodies get a second knee cylinder, some
+// lose their hip-roll cylinders, and some have no hip yaw joint.
 func Random(rng *rand.Rand) Body {
 	u := func(lo, hi float64) float64 { return lo + rng.Float64()*(hi-lo) }
 	jit := func(v geom.V3) geom.V3 {
@@ -211,6 +211,7 @@ func Random(rng *rand.Rand) Body {
 		})
 	}
 	hipRoll := rng.Float64() > 0.25
+	hipYaw := rng.Float64() < 0.75
 	doubleKnee := rng.Float64() < 0.3
 	for _, side := range []struct {
 		s string
@@ -225,11 +226,30 @@ func Random(rng *rand.Rand) Body {
 		// pulley) to a 3° hyperextension lock, ankle 45° plantar to 20°
 		// dorsi. On the left leg (z < 0) positive roll is abduction; the
 		// right is mirrored.
+		// Hip yaw (when present): 40° internal, 45° external rotation, on a
+		// bracket that carries the roll and pitch cylinders' bases, so
+		// turning the leg does not stretch them.
 		rollLo, rollHi := -0.52, 0.79
+		yawLo, yawHi := -0.70, 0.79
 		if z > 0 {
 			rollLo, rollHi = -0.79, 0.52
+			yawLo, yawHi = -0.79, 0.70
 		}
-		link("hip_roll_"+s, "pelvis", geom.V3{0, -drop, z * hw}, geom.V3{1, 0, 0}, rollLo, rollHi, 0.05, geom.V3{}, geom.V3{1e-5, 1e-5, 1e-5})
+		hip := geom.V3{0, -drop, z * hw} // hip centre in the pelvis frame
+		mount, at := "pelvis", hip       // where the roll/pitch cylinder bases attach, and that frame's origin
+		rollParent, rollOrigin := "pelvis", hip
+		if hipYaw {
+			link("hip_yaw_"+s, "pelvis", hip, geom.V3{0, 1, 0}, yawLo, yawHi, u(0.1, 0.2), geom.V3{}, geom.V3{2e-4, 2e-4, 2e-4})
+			mount, at = "hip_yaw_"+s, geom.V3{}
+			rollParent, rollOrigin = "hip_yaw_"+s, geom.V3{}
+		}
+		rel := func(p geom.V3) geom.V3 { // a pelvis-frame point in the mount frame
+			if mount == "pelvis" {
+				return p
+			}
+			return p.Sub(hip).Add(at)
+		}
+		link("hip_roll_"+s, rollParent, rollOrigin, geom.V3{1, 0, 0}, rollLo, rollHi, 0.05, geom.V3{}, geom.V3{1e-5, 1e-5, 1e-5})
 		link("thigh_"+s, "hip_roll_"+s, geom.V3{}, geom.V3{0, 0, 1}, -0.35, 1.57, thM, geom.V3{0, -th / 2, 0}, rodInertia(thM, th))
 		// Front, back and outer side of the limb, so it rests on the floor
 		// when lying down instead of sinking through.
@@ -244,9 +264,12 @@ func Random(rng *rand.Rand) Body {
 		// human-aligned ranges with the most leverage), scaled to segment
 		// length and jittered, so random bodies are only sometimes short of
 		// full range.
-		cyl("hip_pitch_"+s, Anchor{"pelvis", jit(geom.V3{0.055, 0.015 - drop, z * hw})}, Anchor{"thigh_" + s, jit(geom.V3{-0.045, -0.88 * th, 0})}, 0.10)
+		if hipYaw { // horizontal, from the back of the pelvis to a lever on the yaw bracket
+			cyl("hip_yaw_"+s, Anchor{"pelvis", jit(geom.V3{-0.12, -drop, z * (hw - 0.095)})}, Anchor{"hip_yaw_" + s, jit(geom.V3{0.015, 0, -z * 0.03})}, 0.05)
+		}
+		cyl("hip_pitch_"+s, Anchor{mount, jit(rel(geom.V3{0.055, 0.015 - drop, z * hw}))}, Anchor{"thigh_" + s, jit(geom.V3{-0.045, -0.88 * th, 0})}, 0.10)
 		if hipRoll {
-			cyl("hip_roll_"+s, Anchor{"pelvis", jit(geom.V3{0, -0.005 - drop, z * (hw - 0.045)})}, Anchor{"thigh_" + s, jit(geom.V3{0, -0.64 * th, -z * 0.04})}, 0.06)
+			cyl("hip_roll_"+s, Anchor{mount, jit(rel(geom.V3{0, -0.005 - drop, z * (hw - 0.045)}))}, Anchor{"thigh_" + s, jit(geom.V3{0, -0.64 * th, -z * 0.04})}, 0.06)
 		}
 		// Knee: a "quad" down the front of the thigh to the front of the
 		// shin. Ankle: a "calf" down the back of the shin to the heel.

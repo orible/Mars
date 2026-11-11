@@ -192,6 +192,47 @@ func TestWorldStaysFinite(t *testing.T) {
 	}
 }
 
+// On the test stand, driving a hip yaw cylinder must turn that leg (toe in
+// or out) through most of its range, and leave the other leg alone.
+func TestHipYawTurnsLeg(t *testing.T) {
+	m := loadBiped(t)
+	w := NewWorld(m, false)
+	yawCyl, yawQ, otherQ := -1, -1, -1
+	for k, c := range m.Cyl {
+		if c.Name == "hip_yaw_l" {
+			yawCyl = k
+		}
+	}
+	for q := range w.Q {
+		switch m.Names[q+1] {
+		case "hip_yaw_l":
+			yawQ = q
+		case "hip_yaw_r":
+			otherQ = q
+		}
+	}
+	if yawCyl < 0 || yawQ < 0 || otherQ < 0 {
+		t.Fatal("biped has no hip yaw")
+	}
+	for _, dir := range []float64{1, -1} {
+		w = NewWorld(m, false)
+		w.Cmd[yawCyl] = dir
+		for s := 0; s < 20000; s++ { // 1 s
+			w.Step(50e-6)
+		}
+		l := yawQ + 1
+		t.Logf("cmd %+.0f: hip_yaw_l %.1f deg (limits %.0f..%.0f), hip_yaw_r %.1f deg", dir,
+			w.Q[yawQ]*180/math.Pi, m.Lo[l]*180/math.Pi, m.Hi[l]*180/math.Pi, w.Q[otherQ]*180/math.Pi)
+		reached := math.Max(w.Q[yawQ]/m.Hi[l], w.Q[yawQ]/m.Lo[l])
+		if reached < 0.8 {
+			t.Errorf("cmd %+.0f only turned the leg to %.0f%% of its range", dir, 100*reached)
+		}
+		if math.Abs(w.Q[otherQ]) > 0.02 {
+			t.Errorf("the other leg turned too: %.3f rad", w.Q[otherQ])
+		}
+	}
+}
+
 func TestReachContainsNeutral(t *testing.T) {
 	rows := loadBiped(t).Reach(200)
 	if len(rows) == 0 {
