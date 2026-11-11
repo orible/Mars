@@ -12,6 +12,12 @@
       "runtimeExecutable": "C:\\Program Files\\Go\\bin\\go.exe",
       "runtimeArgs": ["-C", "sim", "run", "./cmd/simserver"],
       "port": 8080
+    },
+    {
+      "name": "simserver-trained",
+      "runtimeExecutable": "C:\\Program Files\\Go\\bin\\go.exe",
+      "runtimeArgs": ["-C", "sim", "run", "./cmd/simserver", "-policy", "checkpoints/stand.json", "-push", "2"],
+      "port": 8080
     }
   ]
 }

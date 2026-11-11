@@ -1,0 +1,134 @@
+// Command train runs PPO on the standing task: the biped spec plus random
+// bodies (cylinder count, anchors, CoG), random floor friction and random
+// pushes. It writes the policy checkpoint after every iteration (atomic
+// rename), so a sim server started with -policy on the same file shows
+// the latest weights while training runs.
+//
+//	go run ./cmd/train -iters 300
+//	go run ./cmd/simserver -policy checkpoints/stand.json
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"time"
+
+	"mars/sim/body"
+	"mars/sim/env"
+	"mars/sim/obs"
+	"mars/sim/policy"
+	"mars/sim/ppo"
+)
+
+func writeJSON(path string, v any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(f).Encode(v); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func readJSON(path string, v any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+func main() {
+	cfg := ppo.Defaults()
+	bodyPath := flag.String("body", "bodies/biped.json", "base body spec")
+	out := flag.String("out", "checkpoints/stand.json", "policy checkpoint (value network goes next to it)")
+	resume := flag.Bool("resume", false, "continue from -out and its value network")
+	iters := flag.Int("iters", 300, "PPO iterations")
+	seed := flag.Int64("seed", 1, "random seed")
+	randomFrac := flag.Float64("random-bodies", 0.5, "fraction of episodes on random bodies")
+	logPath := flag.String("log", "runs/stand.csv", "per-iteration statistics (CSV)")
+	flag.IntVar(&cfg.Envs, "envs", cfg.Envs, "parallel environments")
+	flag.IntVar(&cfg.Steps, "steps", cfg.Steps, "policy steps per environment per iteration")
+	flag.Float64Var(&cfg.LR, "lr", cfg.LR, "policy learning rate")
+	flag.Parse()
+
+	base, err := body.Load(*bodyPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rng := rand.New(rand.NewSource(*seed))
+	pol := policy.New(rng, obs.TokenDim, obs.GlobalDim, 32, 64)
+	val := policy.NewValue(rng, obs.TokenDim, obs.GlobalDim, 32, 64)
+	valPath := filepath.Join(filepath.Dir(*out), "value-"+filepath.Base(*out))
+	if *resume {
+		if err := readJSON(*out, pol); err != nil {
+			log.Fatal(err)
+		}
+		if err := readJSON(valPath, val); err != nil {
+			log.Fatal(err)
+		}
+		if len(pol.LogStd) != 1 {
+			pol.LogStd = []float64{policy.DefaultLogStd}
+		}
+		log.Printf("resumed from %s", *out)
+	}
+	if pol.TokenDim != obs.TokenDim || pol.GlobalDim != obs.GlobalDim {
+		log.Fatalf("checkpoint features %d/%d, simulator provides %d/%d", pol.TokenDim, pol.GlobalDim, obs.TokenDim, obs.GlobalDim)
+	}
+
+	ecfg := env.DefaultStand()
+	ecfg.RandomBodyFrac = *randomFrac
+	envs := make([]*env.Env, cfg.Envs)
+	for i := range envs {
+		envs[i] = env.New(base, ecfg, *seed*1000+int64(i))
+	}
+	tr := ppo.New(cfg, pol, val, envs, *seed)
+
+	if err := os.MkdirAll(filepath.Dir(*logPath), 0o755); err != nil {
+		log.Fatal(err)
+	}
+	csv, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer csv.Close()
+	if info, _ := csv.Stat(); info.Size() == 0 {
+		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s")
+	}
+
+	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s",
+		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100**randomFrac, *out)
+	start := time.Now()
+	for i := 0; i < *iters; i++ {
+		s := tr.Iterate()
+		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f\n",
+			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec)
+		fallRate := 0.0
+		if s.Episodes > 0 {
+			fallRate = float64(s.Falls) / float64(s.Episodes)
+		}
+		log.Printf("iter %4d  episodes %4d  fell %3.0f%%  ep %.2f s  return %7.2f  σ %.3f  kl %.4f  clip %.2f  vloss %8.2f  ep %d  %.1f+%.1f s  (%s)",
+			s.Iter, s.Episodes, 100*fallRate, s.MeanSecs, s.MeanReturn, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
+			time.Since(start).Round(time.Second))
+		if err := writeJSON(*out, pol); err != nil {
+			log.Fatal(err)
+		}
+		if err := writeJSON(valPath, val); err != nil {
+			log.Fatal(err)
+		}
+	}
+}

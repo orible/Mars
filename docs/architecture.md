@@ -137,6 +137,19 @@ Most world-model basics are learned in simulation; real hardware only receives p
 - Reward for progress, staying upright and a mocap imitation term, minus hydraulic effort.
 - Random pushes and payloads, so recovery and carrying are part of the same skill.
 
+**Worlds and navigation: walk to the horizon, no map.** Humans head for an objective they can see or know the direction of, and deal with obstacles as they meet them. They remember what they have seen (object permanence) but do not carry a global map. The walking stack is built the same way:
+
+- **Loadable worlds.** A world is a data file, like a body spec. It holds the ground and, later, obstacles and regions with their own friction, plus one objective: a far-off point. The trainer generates random worlds; hand-made ones are for tests and demos. The sim server and the trainer both take a world file.
+- **Egocentric objective.** The network never sees world coordinates. It gets the objective's bearing in its own heading frame, plus how near it is, squashed so a far objective just reads as "far". Its only instruction is to walk that way until the objective grows near.
+- **First-person perception, added later.** Depth rays from a head-mounted viewpoint, matching the real depth camera, enter as another set of tokens, so the ray count can change too. No map is ever passed in.
+- **Object permanence, added later.** A recurrent memory (GRU) in the policy carries what was seen. An obstacle that has dropped out of view, such as a box now underfoot or behind, is still accounted for.
+- **Stages:**
+  1. Flat world, walk toward the objective until near; random objective directions and distances.
+  2. Obstacles and terrain, with collision against the contact points.
+  3. Depth rays.
+  4. Memory.
+  5. An obstacle curriculum.
+
 **Human-like motion.** Use Adversarial Motion Priors (AMP) or DeepMimic-style imitation of human motion-capture clips (CMU, AMASS), retargeted to the robot's leg proportions.
 
 **Domain randomisation.** Randomise fluid properties, valve response, friction, masses, centre of gravity, actuator layout and sensor noise so policies transfer to hardware.

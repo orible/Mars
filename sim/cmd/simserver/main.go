@@ -30,16 +30,19 @@ import (
 	"github.com/coder/websocket"
 
 	"mars/sim/body"
+	"mars/sim/env"
 	"mars/sim/geom"
 	"mars/sim/model"
 	"mars/sim/obs"
 	"mars/sim/policy"
 )
 
+// Timing matches training (package env): 50 µs physics, 1 kHz control
+// ticks, a policy decision every 10 ms.
 const (
-	controlDt = 1e-3                 // s, movement handler tick (1 kHz)
-	substeps  = 20                   // physics substeps per control tick
-	physicsDt = controlDt / substeps // s, 50 µs (pressure dynamics are stiff)
+	controlDt = env.ControlDt
+	substeps  = env.Substeps
+	physicsDt = env.PhysicsDt
 	frameDt   = 33 * time.Millisecond
 )
 
@@ -94,6 +97,10 @@ type sim struct {
 	hold     bool
 	fallenAt float64 // sim time the robot fell, or -1
 	falls    int
+	tick     int
+	policies <-chan *policy.SetPolicy
+	push     float64 // mean seconds between random pushes, 0 = none
+	rng      *rand.Rand
 }
 
 func (s *sim) reset(b body.Body) error {
@@ -120,9 +127,21 @@ func (s *sim) reset(b body.Body) error {
 
 func (s *sim) control() {
 	w := s.world
-	if !s.hold {
+	select {
+	case p := <-s.policies:
+		s.pol = p
+	default:
+	}
+	if !s.hold && s.tick%env.PolicyEvery == 0 {
 		tokens, global := obs.Build(w, obs.ReadIMU(w), geom.V3{})
 		copy(w.Cmd, s.pol.Act(tokens, global))
+	}
+	s.tick++
+	if s.push > 0 && w.Floating && s.rng.Float64() < controlDt/s.push {
+		// Same pushes as training: a sudden sideways velocity change.
+		lo, hi := env.DefaultStand().PushSpeed[0], env.DefaultStand().PushSpeed[1]
+		a, v := s.rng.Float64()*2*math.Pi, lo+s.rng.Float64()*(hi-lo)
+		w.Base.V = w.Base.V.Add(geom.V3{v * math.Cos(a), 0, v * math.Sin(a)})
 	}
 	for i := 0; i < substeps; i++ {
 		w.Step(physicsDt)
@@ -196,6 +215,51 @@ func watch(ctx context.Context, path string, out chan<- body.Body) {
 	}
 }
 
+// watchPolicy polls a checkpoint file (the trainer rewrites it every
+// iteration) and sends each new version on out.
+func watchPolicy(ctx context.Context, path string, out chan<- *policy.SetPolicy) {
+	var last time.Time
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.ModTime().After(last) {
+			continue
+		}
+		last = info.ModTime()
+		p, err := loadPolicy(path)
+		if err != nil {
+			log.Printf("policy not reloaded: %v", err)
+			continue
+		}
+		select {
+		case out <- p:
+		default:
+		}
+	}
+}
+
+func loadPolicy(path string) (*policy.SetPolicy, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	p, err := policy.Load(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if p.TokenDim != obs.TokenDim || p.GlobalDim != obs.GlobalDim {
+		return nil, fmt.Errorf("%s: checkpoint features %d/%d, simulator provides %d/%d", path, p.TokenDim, p.GlobalDim, obs.TokenDim, obs.GlobalDim)
+	}
+	return p, nil
+}
+
 func deg(r float64) float64 { return r * 180 / math.Pi }
 
 func check(path string) {
@@ -230,11 +294,13 @@ func main() {
 	addr := flag.String("addr", "localhost:8080", "listen address")
 	bodyPath := flag.String("body", "bodies/biped.json", "body spec to load and watch")
 	randomEvery := flag.Duration("random", 0, "if > 0, replace the body with a random one at this interval (morphology randomisation demo)")
-	ckpt := flag.String("policy", "", "policy checkpoint (JSON); random weights if empty")
+	ckpt := flag.String("policy", "", "policy checkpoint (JSON), reloaded when the file changes; random weights if empty")
 	seed := flag.Int64("seed", 1, "random seed")
 	checkOnly := flag.Bool("check", false, "print the cylinder reach report for -body and exit")
 	stand := flag.Bool("stand", false, "test stand: bolt the pelvis to the world instead of standing on the floor")
 	hold := flag.Bool("hold", false, "close every valve (cylinders lock the joints) instead of running the policy")
+	push := flag.Float64("push", 0, "if > 0, push the robot sideways (0.1–0.4 m/s) on average every this many seconds, as in training")
+	speed := flag.Float64("speed", 1, "simulated seconds per wall-clock second; 0 = as fast as one core allows (the trainer always runs flat out on every core)")
 	flag.Parse()
 
 	if *checkOnly {
@@ -244,22 +310,17 @@ func main() {
 
 	rng := rand.New(rand.NewSource(*seed))
 	pol := policy.New(rng, obs.TokenDim, obs.GlobalDim, 32, 64)
+	ctx := context.Background()
+	policies := make(chan *policy.SetPolicy, 1)
 	if *ckpt != "" {
-		f, err := os.Open(*ckpt)
+		p, err := loadPolicy(*ckpt)
 		if err != nil {
 			log.Fatal(err)
 		}
-		pol, err = policy.Load(f)
-		f.Close()
-		if err != nil {
-			log.Fatalf("%s: %v", *ckpt, err)
-		}
-		if pol.TokenDim != obs.TokenDim || pol.GlobalDim != obs.GlobalDim {
-			log.Fatalf("%s: checkpoint features %d/%d, simulator provides %d/%d", *ckpt, pol.TokenDim, pol.GlobalDim, obs.TokenDim, obs.GlobalDim)
-		}
+		pol = p
+		go watchPolicy(ctx, *ckpt, policies)
 	}
 
-	ctx := context.Background()
 	bodies := make(chan body.Body, 1)
 	if *randomEvery > 0 {
 		go func() {
@@ -274,7 +335,7 @@ func main() {
 
 	var latest atomic.Pointer[[]byte]
 	go func() {
-		s := &sim{pol: pol, floating: !*stand, hold: *hold}
+		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng}
 		for s.world == nil {
 			if err := s.reset(<-bodies); err != nil {
 				log.Printf("body rejected: %v", err)
@@ -282,7 +343,9 @@ func main() {
 		}
 		tick := time.NewTicker(frameDt)
 		defer tick.Stop()
-		for range tick.C {
+		owed := 0.0 // control ticks owed at the requested speed
+		for {
+			frameStart := time.Now()
 			select {
 			case b := <-bodies:
 				if err := s.reset(b); err != nil {
@@ -290,15 +353,28 @@ func main() {
 				}
 			default:
 			}
-			for i := 0; i < int(frameDt.Seconds()/controlDt+0.5); i++ {
-				s.control()
+			if *speed > 0 {
+				owed += *speed * frameDt.Seconds() / controlDt
+				for ; owed >= 1; owed-- {
+					s.control()
+					if time.Since(frameStart) > frameDt {
+						owed = 0 // CPU-bound: run as fast as it can, don't build a backlog
+						break
+					}
+				}
+			} else {
+				for time.Since(frameStart) < frameDt {
+					s.control()
+				}
 			}
-			data, err := json.Marshal(s.frame())
-			if err != nil {
+			if data, err := json.Marshal(s.frame()); err != nil {
 				log.Printf("marshal frame: %v", err)
-				continue
+			} else {
+				latest.Store(&data)
 			}
-			latest.Store(&data)
+			if *speed > 0 {
+				<-tick.C
+			}
 		}
 	}()
 

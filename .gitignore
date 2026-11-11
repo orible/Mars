@@ -13,3 +13,4 @@ obj/
 # Training artefacts
 /sim/checkpoints/
 /sim/runs/
+*.log

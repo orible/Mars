@@ -13,8 +13,11 @@ Simulation-first stack for a small hydraulic biped. The full plan is in [docs/ar
 | `sim/model` | Kinematics, cylinder length and moment arms per spanned joint, inverse dynamics, the coupled world step, reach report |
 | `sim/hydraulics` | Double-acting cylinder and servo-valve pressure model (also a standalone bench model) |
 | `sim/obs` | Per-cylinder tokens and a global vector; CoG computed from the links |
-| `sim/policy` | Morphology-agnostic set network (shared φ per cylinder → mean pool → shared ρ), JSON checkpoints |
-| `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec, streams frames on `ws://localhost:8080/ws` |
+| `sim/policy` | Morphology-agnostic set network (shared φ per cylinder → mean pool → shared ρ), value network, backprop, Adam, JSON checkpoints |
+| `sim/env` | Training environment: control timing, randomisation (body, CoG, friction, pushes), task reward |
+| `sim/ppo` | PPO with parallel rollouts and parallel gradients |
+| `sim/cmd/train` | Trains the standing task and writes `checkpoints/stand.json` every iteration |
+| `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec and the policy checkpoint, streams frames on `ws://localhost:8080/ws` |
 | `sim/bodies` | Body specs; edit these as hardware measurements come in |
 | `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG |
 
@@ -56,8 +59,27 @@ Bolt the pelvis to the world instead (test stand, legs swing freely):
 cd sim && go run ./cmd/simserver -stand
 ```
 
+## Train
+
+Train the standing task: the biped spec plus random bodies, random floor friction and random pushes. Statistics go to `runs/stand.csv`, and the checkpoint is rewritten after every iteration:
+
+```bash
+cd sim && go run ./cmd/train -iters 400
+```
+
+Watch the latest weights while training runs. The server reloads the checkpoint whenever it changes:
+
+```bash
+cd sim && go run ./cmd/simserver -policy checkpoints/stand.json
+```
+
+Continue a run with `-resume`. The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
+
+The sim server runs at real time so the view is watchable. Add `-speed 4` to fast-forward, or `-speed 0` to run as fast as one core allows. Add `-push 2` to push the robot sideways every 2 s on average, as in training.
+
 ## Status
 
 - Done: 3D body spec with two-anchor cylinders and ground contact points; joint spans and pose-dependent moment arms (checked against finite differences); floating-base dynamics with stick–slip floor contact, coupled to the hydraulics (tests for energy, momentum, sliding distance and standing); fixed-pelvis test stand; spec validation and reach report; pelvis IMU and yaw-free heading frame in the observations; network that handles any cylinder count; hot reload; observer with floor, contact forces and fall count.
-- Placeholder: the network has random weights; there is no leg self-collision.
-- Next: PPO training with body, CoG and floor-friction randomisation: stand first, then walk to commanded targets.
+- Training: PPO written from scratch in Go (gradients checked against finite differences) trains the standing task across random bodies, friction and pushes. The checkpoints are not in git; retrain with `go run ./cmd/train`.
+- Not modelled: leg self-collision.
+- Next: walk to commanded targets, the Phase 1 exit criterion.

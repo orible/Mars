@@ -82,6 +82,9 @@ type SetPolicy struct {
 	Embed     int `json:"embed"`
 	Phi       MLP `json:"phi"` // [token, global] -> embedding
 	Rho       MLP `json:"rho"` // [embedding, context, global] -> command
+	// LogStd is the log of the exploration noise added to every command
+	// during training (one value shared by all actuators).
+	LogStd []float64 `json:"logStd"`
 }
 
 // New creates a randomly initialised policy.
@@ -92,6 +95,7 @@ func New(rng *rand.Rand, tokenDim, globalDim, embed, hidden int) *SetPolicy {
 		Embed:     embed,
 		Phi:       newMLP(rng, tokenDim+globalDim, hidden, embed),
 		Rho:       newMLP(rng, 2*embed+globalDim, hidden, 1),
+		LogStd:    []float64{DefaultLogStd},
 	}
 }
 
@@ -137,6 +141,9 @@ func Load(r io.Reader) (*SetPolicy, error) {
 	}
 	if p.Phi.Layers[0].In != p.TokenDim+p.GlobalDim {
 		return nil, fmt.Errorf("checkpoint expects %d token+global features, phi takes %d", p.TokenDim+p.GlobalDim, p.Phi.Layers[0].In)
+	}
+	if len(p.LogStd) != 1 {
+		p.LogStd = []float64{DefaultLogStd}
 	}
 	return &p, nil
 }
