@@ -78,8 +78,12 @@ func ReferenceNames() []string {
 	return n
 }
 
-// LoadReferences reads a comma-separated list of references.
+// LoadReferences reads a comma-separated list of references; "all" means
+// every built-in one.
 func LoadReferences(list string) ([]Reference, error) {
+	if strings.TrimSpace(list) == "all" {
+		list = strings.Join(ReferenceNames(), ",")
+	}
 	var out []Reference
 	for _, s := range strings.Split(list, ",") {
 		if s = strings.TrimSpace(s); s == "" {

@@ -48,6 +48,7 @@ func main() {
 	desc := flag.String("desc", "", "reference description")
 	source := flag.String("source", "", "attribution for the recording")
 	out := flag.String("out", "", "write the reference JSON here")
+	auto := flag.Bool("auto", false, "find the rise from the floor automatically instead of -from/-to")
 	noAnkle := flag.Bool("ignore-ankle", false, "mark the reference's ankle data as untrustworthy (left out of tracking)")
 	standFrom := flag.Float64("stand-from", 0, "start of a window where the subject stands still (s)")
 	standTo := flag.Float64("stand-to", 0, "end of that window (s); 0 = the last second of the recording")
@@ -71,7 +72,16 @@ func main() {
 	// window, and height relative to the highest pelvis in it.
 	s0, s1 := *standFrom, *standTo
 	if s1 <= 0 {
-		s0, s1 = math.Max(0, dur-1), dur
+		// Default: ±0.15 s around the highest pelvis in the recording,
+		// when the legs are straightest (subjects shift about afterwards).
+		top, topY := 0, math.Inf(-1)
+		for i, f := range frames {
+			if y := f.Get("root", "ty"); y > topY {
+				top, topY = i, y
+			}
+		}
+		t := float64(top) / *fps
+		s0, s1 = math.Max(0, t-0.15), math.Min(dur, t+0.15)
 	}
 	win := frames[int(s0**fps):int(math.Min(float64(len(frames)), s1**fps+1))]
 	standY := 0.0
@@ -121,6 +131,42 @@ func main() {
 	}
 
 	end := *to
+	if *auto {
+		// The rise: from the last moment near the floor before the
+		// subject first reaches 95% of standing height, to that moment.
+		up := -1
+		for i, x := range feats {
+			if x.Height >= 0.95 {
+				up = i
+				break
+			}
+		}
+		if up < 0 {
+			log.Fatal("-auto: the subject never reaches standing height")
+		}
+		low := math.Inf(1)
+		for _, x := range feats[:up] {
+			low = math.Min(low, x.Height)
+		}
+		start := 0
+		for i := up; i >= 0; i-- {
+			if feats[i].Height <= low+0.03 {
+				start = i
+				break
+			}
+		}
+		*from = math.Max(0, float64(start) / *fps - 0.25)
+		// Finish at the straightest moment: the highest pelvis within 2 s
+		// of reaching standing height.
+		top := up
+		for i := up; i < len(feats) && i < up+int(2**fps); i++ {
+			if feats[i].Height > feats[top].Height {
+				top = i
+			}
+		}
+		end = float64(top) / *fps
+		log.Printf("-auto: rise from %.2f s (pelvis %.0f%%) to %.2f s", *from, 100*low, end)
+	}
 	if end <= 0 || end > dur {
 		end = dur
 	}
@@ -129,6 +175,9 @@ func main() {
 	}
 	ref := env.Reference{Name: *name, Description: *desc, IgnoreAnkle: *noAnkle, Sources: []string{*source,
 		fmt.Sprintf("Extracted by cmd/mocapref from %s, %.2f–%.2f s, keyframes every %.2f s; pelvis lean and height from the root; hip = −femur rx, knee = tibia rx, ankle = %+.0f × foot rx; all relative to the subject's standing pose (%.1f–%.1f s).", *amc, *from, end, *every, *ankleSign, s0, s1)}}
+	if end-*from < 2**every {
+		log.Fatalf("excerpt %.2f–%.2f s is too short for keyframes every %.2f s", *from, end, *every)
+	}
 	for t := *from; t <= end+1e-9; t += *every {
 		x := feats[int(math.Min(float64(len(feats)-1), math.Round(t**fps)))]
 		ref.Keyframes = append(ref.Keyframes, env.Keyframe{

@@ -31,8 +31,13 @@ type Config struct {
 	Workers   int
 }
 
+// MinLogStd is the floor on the exploration noise (σ = 0.2 of full valve
+// opening): below it, training stops trying new things before the hard
+// skills (getting up) are found.
+var MinLogStd = math.Log(0.2)
+
 func Defaults() Config {
-	return Config{Envs: 24, Steps: 128, Gamma: 0.99, Lambda: 0.95, Clip: 0.2, LR: 3e-4, VLR: 1e-3,
+	return Config{Envs: 24, Steps: 256, Gamma: 0.99, Lambda: 0.95, Clip: 0.2, LR: 3e-4, VLR: 1e-3,
 		Epochs: 5, Minibatch: 512, Entropy: 0, TargetKL: 0.02, MaxGrad: 1, Workers: runtime.GOMAXPROCS(0)}
 }
 
@@ -319,7 +324,8 @@ func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs in
 			}
 			t.popt.Step(t.Pol.Params(), gp.Params(), cfg.MaxGrad)
 			t.vopt.Step(t.Val.Params(), gv.Params(), cfg.MaxGrad)
-			t.Pol.LogStd[0] = math.Max(-2.5, math.Min(0, t.Pol.LogStd[0]))
+			// Keep exploring: valve noise never drops below σ = 0.2.
+			t.Pol.LogStd[0] = math.Max(MinLogStd, math.Min(0, t.Pol.LogStd[0]))
 		}
 		n := float64(len(batch))
 		kl, clipFrac, vloss = epKL/n, epClip/n, epV/n

@@ -108,7 +108,8 @@ func main() {
 		if len(pol.LogStd) != 1 {
 			pol.LogStd = []float64{policy.DefaultLogStd}
 		}
-		log.Printf("resumed from %s", *out)
+		pol.LogStd[0] = math.Max(ppo.MinLogStd, pol.LogStd[0]) // restore exploration if it had collapsed
+		log.Printf("resumed from %s (exploration σ %.2f)", *out, pol.Std())
 	}
 	if pol.TokenDim != obs.TokenDim || pol.GlobalDim != obs.GlobalDim {
 		log.Fatalf("checkpoint features %d/%d, simulator provides %d/%d", pol.TokenDim, pol.GlobalDim, obs.TokenDim, obs.GlobalDim)

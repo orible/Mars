@@ -53,9 +53,9 @@ type Scenario struct {
 	UnassistedFrac float64 `json:"unassistedFrac"`
 }
 
-// allRises are the human getting-up references: one from the sit-to-stand
-// literature, three from CMU motion capture.
-const allRises = "squat-to-stand,kneel-to-stand,floor-to-stand,side-to-stand"
+// allRises are the human getting-up references: every built-in one (one
+// from the sit-to-stand literature, the rest from CMU motion capture).
+const allRises = "all"
 
 func flatWorld() world.RandomConfig {
 	return world.RandomConfig{Count: 1, Distance: [2]float64{1, 1}, Friction: [2]float64{0.5, 1.1}, Arrive: 0.4}
@@ -66,7 +66,7 @@ var Scenarios = map[string]Scenario{
 	"getup": {
 		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
 		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: allRises,
-		RandomBodyFrac: 0.5, EpisodeSeconds: 10,
+		RandomBodyFrac: 0.5, EpisodeSeconds: 20,
 	},
 	"stand": {
 		Description: "stand still on the stop command through random pushes",

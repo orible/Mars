@@ -200,7 +200,22 @@ Most world-model basics are learned in simulation; real hardware only receives p
     - squat → squat-to-stand
     - kneel → side-to-stand
     - sit or lying → floor-to-stand
+  - **More recordings:** subjects 139 and 140 add nine dedicated get-up takes. CMU's subject 77 takes are byte-identical copies of 139's, so they were dropped.
+    - face down: 2
+    - on the side: 2
+    - on the back: 3
+    - from the ground: 2
+  - **Automatic extraction:** `cmd/mocapref -auto` finds each rise, from the last moment near the floor to the straightest standing moment. It calibrates to that straightest pose rather than the end of the clip, because subjects shift about afterwards.
+  - **Coverage:** 13 references in all; scenarios use `"reference": "all"`. Each floor start picks a close match:
+    - squat: 10°
+    - kneel: 8°
+    - sit: 20°
+    - lying: 13°
   - **The raw recordings stay out of git** (`sim/mocap/cmu-*`). Only the extracted keyframes, with attribution, are committed.
+- **Longer practice:**
+  - getup episodes last 20 s, so slow rises are not cut off;
+  - each iteration collects 256 steps per environment;
+  - exploration noise never drops below σ = 0.2 (it had collapsed to about 0.13 before get-ups were found).
 - **Scenarios** (`-scenario` on the trainer and the sim server) choose the mix:
   - `getup`: always start on the floor.
   - `stand`: stand through pushes.
