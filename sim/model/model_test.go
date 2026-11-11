@@ -12,15 +12,19 @@ import (
 
 func loadBiped(t *testing.T) *Model {
 	t.Helper()
-	b, err := body.Load("../bodies/biped.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := New(b)
+	m, err := loadBipedB()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return m
+}
+
+func loadBipedB() (*Model, error) {
+	b, err := body.Load("../bodies/biped.json")
+	if err != nil {
+		return nil, err
+	}
+	return New(b)
 }
 
 func cylParams() hydraulics.Params {
@@ -170,7 +174,7 @@ func TestDoublePendulumConservesEnergy(t *testing.T) {
 
 func TestWorldStaysFinite(t *testing.T) {
 	m := loadBiped(t)
-	w := NewWorld(m)
+	w := NewWorld(m, false)
 	for k := range w.Cmd {
 		w.Cmd[k] = math.Sin(float64(k))
 	}

@@ -8,9 +8,10 @@
 // Run with -check to print each cylinder's reachable joint range for the
 // spec (pelvis and limb layout check) and exit.
 //
-// Current mode is the test stand: the pelvis is fixed and the legs swing
-// under gravity and cylinder forces. A floating base with foot contacts is
-// the next step towards walking.
+// By default the robot stands free on a flat floor (floating pelvis, foot
+// contact points from the spec) and is put back upright 1 s after it
+// falls. -stand bolts the pelvis to the world instead (test stand), and
+// -hold closes every valve so the cylinders lock the joints.
 package main
 
 import (
@@ -63,21 +64,36 @@ type CylFrame struct {
 	Command float64 `json:"cmd"`
 }
 
+type ContactFrame struct {
+	P geom.V3 `json:"p"` // world position
+	F geom.V3 `json:"f"` // ground force on the robot, N
+}
+
 type Frame struct {
-	T         float64     `json:"t"`
-	BodyName  string      `json:"body"`
-	BodyRev   int         `json:"bodyRev"`
-	Mass      float64     `json:"mass"`
-	CoG       geom.V3     `json:"cog"`
-	Supply    float64     `json:"supply"`
-	Links     []LinkFrame `json:"links"`
-	Cylinders []CylFrame  `json:"cylinders"`
+	T         float64        `json:"t"`
+	BodyName  string         `json:"body"`
+	BodyRev   int            `json:"bodyRev"`
+	Floating  bool           `json:"floating"`
+	Mass      float64        `json:"mass"`
+	CoG       geom.V3        `json:"cog"`
+	Pelvis    geom.V3        `json:"pelvis"`
+	Pitch     float64        `json:"pitch"`
+	Roll      float64        `json:"roll"`
+	Falls     int            `json:"falls"`
+	Supply    float64        `json:"supply"`
+	Links     []LinkFrame    `json:"links"`
+	Cylinders []CylFrame     `json:"cylinders"`
+	Contacts  []ContactFrame `json:"contacts"`
 }
 
 type sim struct {
-	world *model.World
-	rev   int
-	pol   *policy.SetPolicy
+	world    *model.World
+	rev      int
+	pol      *policy.SetPolicy
+	floating bool
+	hold     bool
+	fallenAt float64 // sim time the robot fell, or -1
+	falls    int
 }
 
 func (s *sim) reset(b body.Body) error {
@@ -85,7 +101,11 @@ func (s *sim) reset(b body.Body) error {
 	if err != nil {
 		return err
 	}
-	s.world = model.NewWorld(m)
+	if s.floating && len(m.Contacts) == 0 {
+		return fmt.Errorf("body %q has no contact points, so it cannot stand on the floor; add \"contacts\" to its feet or run with -stand", b.Name)
+	}
+	s.world = model.NewWorld(m, s.floating)
+	s.fallenAt = -1
 	s.rev++
 	limited := 0
 	for _, r := range m.Reach(200) {
@@ -100,22 +120,44 @@ func (s *sim) reset(b body.Body) error {
 
 func (s *sim) control() {
 	w := s.world
-	tokens, global := obs.Build(w, obs.IMU{}, geom.V3{})
-	copy(w.Cmd, s.pol.Act(tokens, global))
+	if !s.hold {
+		tokens, global := obs.Build(w, obs.ReadIMU(w), geom.V3{})
+		copy(w.Cmd, s.pol.Act(tokens, global))
+	}
 	for i := 0; i < substeps; i++ {
 		w.Step(physicsDt)
 	}
-	if !w.Healthy() {
+	switch {
+	case !w.Healthy():
 		log.Printf("simulation diverged at t=%.3f s; resetting pose", w.T)
-		s.world = model.NewWorld(w.M)
+		s.restart()
+	case w.Fallen() && s.fallenAt < 0:
+		s.fallenAt = w.T
+		s.falls++
+	case s.fallenAt >= 0 && w.T-s.fallenAt > 1:
+		s.restart()
 	}
+}
+
+// restart puts the same body back in the neutral pose, keeping sim time.
+func (s *sim) restart() {
+	t := s.world.T
+	s.world = model.NewWorld(s.world.M, s.floating)
+	s.world.T = t
+	s.fallenAt = -1
 }
 
 func (s *sim) frame() Frame {
 	w := s.world
 	m := w.M
 	cog, mass := w.CoG()
-	f := Frame{T: w.T, BodyName: m.Body.Name, BodyRev: s.rev, Mass: mass, CoG: cog, Supply: m.Supply.Pressure}
+	imu := obs.ReadIMU(w)
+	f := Frame{T: w.T, BodyName: m.Body.Name, BodyRev: s.rev, Floating: w.Floating, Mass: mass, CoG: cog,
+		Pelvis: w.Base.P, Pitch: imu.Pitch, Roll: imu.Roll, Falls: s.falls, Supply: m.Supply.Pressure,
+		Contacts: []ContactFrame{}}
+	for i, c := range m.Contacts {
+		f.Contacts = append(f.Contacts, ContactFrame{P: m.Point(w.Pose, c.Link, c.Point), F: w.ContactF[i]})
+	}
 	for i, name := range m.Names {
 		f.Links = append(f.Links, LinkFrame{Name: name, Parent: m.Parent[i], Origin: w.Pose.P[i], Com: m.Point(w.Pose, i, m.Com[i])})
 	}
@@ -191,6 +233,8 @@ func main() {
 	ckpt := flag.String("policy", "", "policy checkpoint (JSON); random weights if empty")
 	seed := flag.Int64("seed", 1, "random seed")
 	checkOnly := flag.Bool("check", false, "print the cylinder reach report for -body and exit")
+	stand := flag.Bool("stand", false, "test stand: bolt the pelvis to the world instead of standing on the floor")
+	hold := flag.Bool("hold", false, "close every valve (cylinders lock the joints) instead of running the policy")
 	flag.Parse()
 
 	if *checkOnly {
@@ -230,7 +274,7 @@ func main() {
 
 	var latest atomic.Pointer[[]byte]
 	go func() {
-		s := &sim{pol: pol}
+		s := &sim{pol: pol, floating: !*stand, hold: *hold}
 		for s.world == nil {
 			if err := s.reset(<-bodies); err != nil {
 				log.Printf("body rejected: %v", err)

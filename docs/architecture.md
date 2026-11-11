@@ -37,7 +37,8 @@ The sim is 3D from the start, because much of what makes the pelvis matter is 3D
 - **Cylinders are pinned between two anchors.** Each anchor is a point on a link. Which joints a cylinder spans follows from the tree (a pelvis-to-thigh cylinder spans both hip joints; a pelvis-to-shin cylinder would span hip and knee). Its moment arm about every spanned joint is computed from the current pose each step, and its force acts along the line between the pins. Strength comes from the bore and rod areas times its pressure limit (supply or its own relief setting).
 - **Pelvis configuration is data.** Hip spacing, hip drop and every anchor point on the pelvis plate live in the spec file.
 - **Geometry validation.** A spec is rejected if any cylinder cannot be assembled in the neutral pose. The reach report (`simserver -check`) lists, for each cylinder and each joint it spans, how much of the joint's range the stroke actually allows. Use it to adjust anchor points before printing parts.
-- **Test stand first.** The current dynamics bolt the pelvis to the world and let the legs swing (recursive Newton–Euler, 50 µs steps coupled to the hydraulics). A floating base with foot contacts comes next and is required for walking.
+- **Contact points are data.** Each link can list points that touch the ground: sole corners on the feet, plus kneecaps and pelvis corners so falls land properly.
+- **Floor or test stand.** By default the pelvis floats and the robot stands on a flat floor (recursive Newton–Euler with a free base, 50 µs steps coupled to the hydraulics). `simserver -stand` bolts the pelvis to the world so the legs swing freely.
 
 **Phase 1 exit criterion: the network walks in the simulator** to commanded targets across the randomised body range, not just holds a pose.
 
@@ -118,7 +119,7 @@ The robot gets more capable by growing a skill library and retraining small, bou
 
 Most world-model basics are learned in simulation; real hardware only receives policies that already pass there.
 
-**Physics.** 3D from the start. A pure-Go articulated-body sim covers the test stand (fixed pelvis) today. For walking it needs a floating base and foot–ground contact with friction: either extend the pure-Go sim, or call MuJoCo's C API from Go through cgo and keep the hydraulic model in Go.
+**Physics.** 3D, pure Go, no C toolchain needed. The pelvis is a free 6-DOF base. Ground contact is a spring-damper per contact point, with stick–slip Coulomb friction: a point sticks where it touched down until the tangential force leaves the friction cone, then slides at μ·N. The hydraulics already force 50 µs steps, so this simple contact model is stable. Tests check momentum conservation in free flight, the Coulomb sliding distance, and the biped standing with its valves closed. The factored mass matrix is reused for 5 steps; one simulated second costs about 0.22 s on one core. Floor stiffness, damping and friction are `model.Ground` parameters, ready for randomisation. Cross-checking against MuJoCo by exporting the spec remains an option if the contact model is ever in doubt.
 
 **Hydraulic actuator model**, stepped alongside the physics for each cylinder:
 
@@ -193,7 +194,7 @@ Two tracks run side by side: a hardware ladder where every step is a working dev
 
 **Software track**
 
-1. Go 3D sim with the hydraulic actuator model, a data-driven body description (links, joints, two-anchor cylinders), a reach check, and the Blazor observer. Test stand (fixed pelvis) first, then a floating base with foot contacts.
+1. Go 3D sim with the hydraulic actuator model, a data-driven body description (links, joints, two-anchor cylinders), a reach check, and the Blazor observer. Test stand (fixed pelvis) and a floating base standing on the floor with contact friction (done).
 2. **Phase 1 core:** the morphology-agnostic movement network, trained across random actuator counts and centres of gravity. First a balance/hold-pose task, then goal-conditioned walking ("reach this x-position"), then 2D targets, pushes and payloads.
 3. Arm reach-and-grasp policy in the sim.
 4. Combined walk + grasp + hand-over through the skill API.
@@ -212,5 +213,6 @@ Two tracks run side by side: a hardware ladder where every step is a working dev
 - [ ] Workstation spec for training: CPU cores, GPU availability.
 - [ ] Movement network pooling: is mean pooling enough, or is attention over actuator tokens needed from the start? What range of actuator counts and CoG offsets must phase 1 cover?
 - [ ] Movement network structure: cylinders that span two joints need more than a fixed-size token. Move to a graph network over links, joints and cylinders?
-- [ ] Contact physics for walking: extend the pure-Go sim with a floating base and foot contacts, or use MuJoCo through cgo (needs a C toolchain on Windows)?
-- [ ] Leg self-collision is not modelled yet; legs can pass through each other on the test stand.
+- [x] Contact physics for walking: pure Go (floating base plus point contacts with stick–slip friction). MuJoCo stays an optional cross-check.
+- [ ] Leg self-collision is not modelled yet; legs can pass through each other.
+- [ ] Floor variety: slopes, steps and soft ground are not modelled; the floor is flat at y = 0.

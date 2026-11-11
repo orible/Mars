@@ -3,9 +3,12 @@
 // every joint, and inverse dynamics (recursive Newton–Euler).
 //
 // Joint i (i ≥ 1) moves link i relative to its parent; its coordinate is
-// q[i-1]. Link 0 is the pelvis. In the current fixed-base (test stand)
-// mode the pelvis is bolted to the world; a floating base with foot
-// contacts is the next step.
+// q[i-1]. Link 0 is the pelvis, which is either bolted to the world (test
+// stand) or free (floating base). With a floating base the generalised
+// velocity is ν = [v, ω, q̇]: the world velocity of the pelvis frame
+// origin, the pelvis angular velocity in the world, then the joint rates.
+// The matching generalised forces are [force, moment about the pelvis
+// origin, joint torques].
 package model
 
 import (
@@ -33,23 +36,30 @@ type Cyl struct {
 // Model is an immutable compiled body plus scratch space for dynamics.
 // A Model must not be used from several goroutines at once.
 type Model struct {
-	Body    body.Body
-	Names   []string
-	Parent  []int
-	Origin  []geom.V3
-	Axis    []geom.V3
-	Com     []geom.V3
-	Inertia []geom.V3
-	Mass    []float64
-	Lo, Hi  []float64
-	Damping []float64
-	Cyl     []Cyl
-	Supply  hydraulics.Supply
+	Body     body.Body
+	Names    []string
+	Parent   []int
+	Origin   []geom.V3
+	Axis     []geom.V3
+	Com      []geom.V3
+	Inertia  []geom.V3
+	Mass     []float64
+	Lo, Hi   []float64
+	Damping  []float64
+	Cyl      []Cyl
+	Supply   hydraulics.Supply
+	Contacts []Contact
 
 	moves [][]bool // moves[l][j]: rotating joint j moves link l
 
 	om, al, ao, f, n []geom.V3
 	zero, unit, col  []float64
+}
+
+// Contact is a point on a link that collides with the ground.
+type Contact struct {
+	Link  int
+	Point geom.V3 // in the link frame
 }
 
 // New validates and compiles a body.
@@ -77,6 +87,9 @@ func New(b body.Body) (*Model, error) {
 		m.moves[i] = make([]bool, n)
 		for k := i; k > 0; k = m.Parent[k] {
 			m.moves[i][k] = true
+		}
+		for _, p := range l.Contacts {
+			m.Contacts = append(m.Contacts, Contact{Link: i, Point: p})
 		}
 	}
 	for _, c := range b.Cylinders {
@@ -110,8 +123,11 @@ func (m *Model) NewPose() *Pose {
 }
 
 // FK fills ps for joint coordinates q, with the pelvis at the world origin.
-func (m *Model) FK(q []float64, ps *Pose) {
-	ps.R[0], ps.P[0] = geom.Identity(), geom.V3{}
+func (m *Model) FK(q []float64, ps *Pose) { m.FKBase(geom.Identity(), geom.V3{}, q, ps) }
+
+// FKBase fills ps with the pelvis at orientation r0 and position p0.
+func (m *Model) FKBase(r0 geom.M3, p0 geom.V3, q []float64, ps *Pose) {
+	ps.R[0], ps.P[0] = r0, p0
 	for i := 1; i < len(m.Names); i++ {
 		p := m.Parent[i]
 		ps.Z[i] = ps.R[p].MulV(m.Axis[i])
@@ -152,10 +168,31 @@ func (m *Model) CylLength(ps *Pose, k int, dLdq []float64) float64 {
 }
 
 // RNEA computes the joint torques needed to produce accelerations qdd at
-// velocities qd under gravity g (recursive Newton–Euler, world frame).
+// velocities qd under gravity g (recursive Newton–Euler, world frame),
+// with the pelvis fixed.
 func (m *Model) RNEA(ps *Pose, qd, qdd []float64, g geom.V3, tau []float64) {
+	m.rnea(ps, geom.V3{}, geom.V3{}, geom.V3{}, qd, qdd, g, tau)
+}
+
+// RNEAFloating is RNEA for a free pelvis: nu and nud are generalised
+// velocity and acceleration ([v, ω, q̇] and its derivative) and gen
+// receives the 6+NDof generalised forces that produce them.
+func (m *Model) RNEAFloating(ps *Pose, nu, nud []float64, g geom.V3, gen []float64) {
+	w0 := geom.V3{nu[3], nu[4], nu[5]}
+	a0 := geom.V3{nud[0], nud[1], nud[2]}
+	al0 := geom.V3{nud[3], nud[4], nud[5]}
+	f0, n0 := m.rnea(ps, w0, al0, a0, nu[6:], nud[6:], g, gen[6:])
+	copy(gen[0:3], f0[:])
+	copy(gen[3:6], n0[:])
+}
+
+// rnea runs Newton–Euler with the pelvis moving at angular velocity w0,
+// angular acceleration al0 and origin acceleration a0. It writes joint
+// torques to tau and returns the force and the moment about the pelvis
+// origin that the pelvis must receive.
+func (m *Model) rnea(ps *Pose, w0, al0, a0 geom.V3, qd, qdd []float64, g geom.V3, tau []float64) (geom.V3, geom.V3) {
 	n := len(m.Names)
-	m.om[0], m.al[0], m.ao[0] = geom.V3{}, geom.V3{}, g.Scale(-1)
+	m.om[0], m.al[0], m.ao[0] = w0, al0, a0.Sub(g)
 	for i := 1; i < n; i++ {
 		p := m.Parent[i]
 		z := ps.Z[i]
@@ -179,6 +216,62 @@ func (m *Model) RNEA(ps *Pose, qd, qdd []float64, g geom.V3, tau []float64) {
 		p := m.Parent[i]
 		m.f[p] = m.f[p].Add(m.f[i])
 		m.n[p] = m.n[p].Add(m.n[i]).Add(ps.P[i].Sub(ps.P[p]).Cross(m.f[i]))
+	}
+	return m.f[0], m.n[0]
+}
+
+// MassMatrixFloating fills M ((6+NDof)×(6+NDof)) for a free pelvis.
+func (m *Model) MassMatrixFloating(ps *Pose, M [][]float64) {
+	nd := m.NDof()
+	for j := 0; j < 6+nd; j++ {
+		var a0, al0 geom.V3
+		for i := range m.unit {
+			m.unit[i] = 0
+		}
+		switch {
+		case j < 3:
+			a0[j] = 1
+		case j < 6:
+			al0[j-3] = 1
+		default:
+			m.unit[j-6] = 1
+		}
+		f0, n0 := m.rnea(ps, geom.V3{}, al0, a0, m.zero, m.unit, geom.V3{}, m.col)
+		for i := 0; i < 3; i++ {
+			M[i][j], M[3+i][j] = f0[i], n0[i]
+		}
+		for i := range m.col {
+			M[6+i][j] = m.col[i]
+		}
+	}
+}
+
+// PointVelocity is the world velocity of world point p fixed to link l,
+// for pelvis origin velocity v0, pelvis angular velocity w0 and joint
+// rates qd.
+func (m *Model) PointVelocity(ps *Pose, v0, w0 geom.V3, qd []float64, l int, p geom.V3) geom.V3 {
+	v := v0.Add(w0.Cross(p.Sub(ps.P[0])))
+	for j := l; j > 0; j = m.Parent[j] {
+		v = v.Add(ps.Z[j].Scale(qd[j-1]).Cross(p.Sub(ps.P[j])))
+	}
+	return v
+}
+
+// AddPointForce adds the generalised force of world force f applied at
+// world point p on link l. gen holds 6 base entries first when floating
+// is true, then one per joint.
+func (m *Model) AddPointForce(ps *Pose, l int, p, f geom.V3, floating bool, gen []float64) {
+	off := 0
+	if floating {
+		mo := p.Sub(ps.P[0]).Cross(f)
+		for i := 0; i < 3; i++ {
+			gen[i] += f[i]
+			gen[3+i] += mo[i]
+		}
+		off = 6
+	}
+	for j := l; j > 0; j = m.Parent[j] {
+		gen[off+j-1] += ps.Z[j].Dot(p.Sub(ps.P[j]).Cross(f))
 	}
 }
 
@@ -210,7 +303,13 @@ func (m *Model) CoG(ps *Pose) (geom.V3, float64) {
 
 // solveSPD solves A·x = b in place (b becomes x) by Cholesky; A is overwritten.
 func solveSPD(A [][]float64, b []float64) {
-	n := len(b)
+	cholesky(A)
+	cholSolve(A, b)
+}
+
+// cholesky overwrites the lower triangle of A with L, where A = L·Lᵀ.
+func cholesky(A [][]float64) {
+	n := len(A)
 	for j := 0; j < n; j++ {
 		s := A[j][j]
 		for k := 0; k < j; k++ {
@@ -226,6 +325,11 @@ func solveSPD(A [][]float64, b []float64) {
 			A[i][j] = t / s
 		}
 	}
+}
+
+// cholSolve solves L·Lᵀ·x = b in place for a factor from cholesky.
+func cholSolve(A [][]float64, b []float64) {
+	n := len(b)
 	for i := 0; i < n; i++ {
 		t := b[i]
 		for k := 0; k < i; k++ {

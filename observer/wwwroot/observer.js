@@ -59,12 +59,16 @@ function report(state) {
 
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
-// Orthographic projections: [screen-right, up] for a world point.
+// Orthographic projections: [screen-right, up] for a world point. The
+// camera follows the pelvis across the floor; ground ticks every 10 cm
+// show travel.
 const views = [
-  { title: "side (left)", cx: 150, project: (p) => [p[0], p[1]] },
-  { title: "front", cx: 410, project: (p) => [-p[2], p[1]] },
+  { title: "side (left)", cx: 150, axis: 0, sign: 1 },
+  { title: "front", cx: 410, axis: 2, sign: -1 },
 ];
-const viewTop = 90, scale = 520;
+const standTop = 90, standScale = 520; // test stand: pelvis mount near the top
+const groundY = 520, floorScale = 600; // floating: floor near the bottom
+const newtonsToMetres = 1 / 250; // contact force arrows
 
 function draw(canvas, f) {
   const ctx = canvas.getContext("2d");
@@ -72,21 +76,32 @@ function draw(canvas, f) {
   ctx.fillStyle = css("--panel");
   ctx.fillRect(0, 0, W, H);
   ctx.font = "12px system-ui, sans-serif";
+  const floating = !!f.floating;
+  const scale = floating ? floorScale : standScale;
+  const y0 = floating ? groundY : standTop;
+  const pelvis = f.pelvis || [0, 0, 0];
 
   for (const v of views) {
-    const at = (p) => {
-      const [x, y] = v.project(p);
-      return [v.cx + x * scale, viewTop - y * scale];
-    };
+    const follow = floating ? pelvis[v.axis] : 0;
+    const at = (p) => [v.cx + v.sign * (p[v.axis] - follow) * scale, y0 - p[1] * scale];
     ctx.fillStyle = css("--muted-text");
     ctx.fillText(v.title, v.cx - 110, 24);
 
-    // Floor-free test stand: draw the fixed pelvis mount.
+    // Floor (floating) or the fixed pelvis mount (test stand).
     ctx.strokeStyle = css("--grid");
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(v.cx - 110, viewTop); ctx.lineTo(v.cx + 110, viewTop);
+    ctx.moveTo(v.cx - 125, y0); ctx.lineTo(v.cx + 125, y0);
     ctx.stroke();
+    if (floating) {
+      ctx.save();
+      ctx.beginPath(); ctx.rect(v.cx - 125, 0, 250, H); ctx.clip();
+      for (let m = Math.floor((follow - 0.3) * 10); m <= Math.ceil((follow + 0.3) * 10); m++) {
+        const x = v.cx + v.sign * (m / 10 - follow) * scale;
+        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + (m % 10 === 0 ? 14 : 6)); ctx.stroke();
+      }
+      ctx.restore();
+    }
 
     // Bones: parent joint -> child joint; leaf links extend through their CoM.
     const hasChild = new Set(f.links.map((l) => l.parent));
@@ -119,7 +134,32 @@ function draw(canvas, f) {
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(gx, gy, 8, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(gx - 12, gy); ctx.lineTo(gx + 12, gy); ctx.moveTo(gx, gy - 12); ctx.lineTo(gx, gy + 12); ctx.stroke();
+
+    // CoG ground projection, and the ground force on each contact point.
+    if (floating) {
+      ctx.setLineDash([3, 4]);
+      ctx.lineWidth = 1;
+      line(ctx, [gx, gy], [gx, y0]);
+      ctx.setLineDash([]);
+    }
+    for (const c of f.contacts || []) {
+      const p = at(c.p);
+      ctx.fillStyle = css("--muted-text");
+      dot(ctx, p, 2);
+      if (c.f[1] > 0) {
+        const tip = at([0, 1, 2].map((k) => c.p[k] + c.f[k] * newtonsToMetres));
+        ctx.strokeStyle = css("--press-a");
+        ctx.lineWidth = 2;
+        line(ctx, p, tip);
+      }
+    }
   }
+
+  ctx.fillStyle = css("--muted-text");
+  const deg = (r) => (r * 180 / Math.PI).toFixed(1);
+  ctx.fillText(floating
+    ? `pelvis height ${(pelvis[1] * 100).toFixed(1)} cm · pitch ${deg(f.pitch || 0)}° · roll ${deg(f.roll || 0)}° · falls ${f.falls || 0}`
+    : "test stand (pelvis fixed)", 40, H - 12);
 
   // Right: one row per cylinder — stroke, chamber pressures, valve command.
   const left = 590, rowH = Math.min(44, (H - 60) / Math.max(1, f.cylinders.length));

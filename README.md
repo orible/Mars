@@ -44,8 +44,20 @@ Cycle through random bodies (pelvis width, segment lengths, anchors, cylinder co
 cd sim && go run ./cmd/simserver -random 5s
 ```
 
+The robot stands on the floor by default. With the untrained policy it falls within a couple of seconds and is put back upright 1 s later. Close every valve so the cylinders lock the joints and it stands still:
+
+```bash
+cd sim && go run ./cmd/simserver -hold
+```
+
+Bolt the pelvis to the world instead (test stand, legs swing freely):
+
+```bash
+cd sim && go run ./cmd/simserver -stand
+```
+
 ## Status
 
-- Done: 3D body spec with two-anchor cylinders; joint spans and pose-dependent moment arms (checked against finite differences); fixed-pelvis test stand dynamics coupled to the hydraulics (energy-conservation test); spec validation and reach report; network that handles any cylinder count; hot reload; observer.
-- Placeholder: the network has random weights; there is no ground contact or leg self-collision.
-- Next: floating base with foot contacts, then PPO training with body and CoG randomisation until it walks to commanded targets.
+- Done: 3D body spec with two-anchor cylinders and ground contact points; joint spans and pose-dependent moment arms (checked against finite differences); floating-base dynamics with stick–slip floor contact, coupled to the hydraulics (tests for energy, momentum, sliding distance and standing); fixed-pelvis test stand; spec validation and reach report; pelvis IMU and yaw-free heading frame in the observations; network that handles any cylinder count; hot reload; observer with floor, contact forces and fall count.
+- Placeholder: the network has random weights; there is no leg self-collision.
+- Next: PPO training with body, CoG and floor-friction randomisation: stand first, then walk to commanded targets.

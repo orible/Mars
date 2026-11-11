@@ -4,6 +4,11 @@
 // per cylinder (anchor positions relative to the CoG). Each token also
 // carries the cylinder's live moment arms, so pelvis and limb geometry is
 // visible to the network.
+//
+// Positions are expressed in the heading frame: centred on the pelvis,
+// with gravity's up axis and the pelvis's forward direction projected onto
+// the floor. Features therefore do not change when the robot walks
+// somewhere else or turns around, but do change when it leans.
 package obs
 
 import (
@@ -17,7 +22,7 @@ import (
 // Feature sizes. Changing them invalidates checkpoints.
 const (
 	TokenDim  = 15
-	GlobalDim = 9
+	GlobalDim = 12
 	// MaxArms is how many of a cylinder's moment arms (largest first) go
 	// into its token. A graph network over links, joints and cylinders
 	// will remove this cap.
@@ -32,26 +37,48 @@ const (
 	armScale    = 0.05 // m
 	massScale   = 10   // kg
 	countScale  = 10   // cylinders
+	gyroScale   = 5    // rad/s
 )
 
 // IMU is the fused pelvis IMU reading.
 type IMU struct {
-	Pitch float64 // rad, 0 = upright
-	Roll  float64 // rad
+	Pitch float64 // rad, 0 = upright, positive = nose up
+	Roll  float64 // rad, positive = right side down
+	Gyro  geom.V3 // rad/s, pelvis frame
+}
+
+// ReadIMU is what an ideal IMU on the pelvis would report.
+func ReadIMU(w *model.World) IMU {
+	r := w.Base.R
+	fwdY, rightY := r[1][0], r[1][2]
+	return IMU{
+		Pitch: math.Asin(math.Max(-1, math.Min(1, fwdY))),
+		Roll:  math.Asin(math.Max(-1, math.Min(1, -rightY))),
+		Gyro:  r.T().MulV(w.Base.W),
+	}
+}
+
+// heading returns the map from world vectors to the heading frame.
+func heading(w *model.World) geom.M3 {
+	r := w.Base.R
+	yaw := math.Atan2(-r[2][0], r[0][0]) // pelvis forward axis projected onto the floor
+	return geom.AxisAngle(geom.V3{0, 1, 0}, yaw).T()
 }
 
 // Build returns the per-cylinder tokens and the global feature vector.
 // goal is the commanded target in the robot's own frame (x forward, z right).
 func Build(w *model.World, imu IMU, goal geom.V3) ([][]float64, []float64) {
 	m := w.M
-	cog, mass := w.CoG()
+	h := heading(w)
+	cogW, mass := w.CoG()
+	cog := h.MulV(cogW.Sub(w.Base.P))
 	ps := m.Supply.Pressure
 	tokens := make([][]float64, len(m.Cyl))
 	arms := make([]float64, 0, 4)
 	for k, c := range m.Cyl {
 		st := w.Cyl[k]
-		b := m.Point(w.Pose, c.BaseLink, c.Base).Sub(cog)
-		r := m.Point(w.Pose, c.RodLink, c.Rod).Sub(cog)
+		b := h.MulV(m.Point(w.Pose, c.BaseLink, c.Base).Sub(cogW))
+		r := h.MulV(m.Point(w.Pose, c.RodLink, c.Rod).Sub(cogW))
 		arms = append(arms[:0], w.DLdq[k]...)
 		sort.Slice(arms, func(i, j int) bool { return math.Abs(arms[i]) > math.Abs(arms[j]) })
 		var top [MaxArms]float64
@@ -73,6 +100,7 @@ func Build(w *model.World, imu IMU, goal geom.V3) ([][]float64, []float64) {
 		mass / massScale,
 		cog[0] / lengthScale, cog[1] / lengthScale, cog[2] / lengthScale,
 		imu.Pitch, imu.Roll,
+		imu.Gyro[0] / gyroScale, imu.Gyro[1] / gyroScale, imu.Gyro[2] / gyroScale,
 		goal[0], goal[2],
 		float64(len(m.Cyl)) / countScale,
 	}

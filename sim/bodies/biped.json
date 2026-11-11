@@ -2,25 +2,28 @@
   "name": "biped",
   "supply": { "pressure": 3500000, "tank": 0, "bulkModulus": 200000000 },
   "links": [
-    { "name": "pelvis", "mass": 2.5, "com": [0, 0.05, 0], "inertia": [0.01, 0.01, 0.01] },
+    { "name": "pelvis", "mass": 2.5, "com": [0, 0.05, 0], "inertia": [0.01, 0.01, 0.01],
+      "contacts": [[0.08, 0, -0.1], [0.08, 0, 0.1], [-0.08, 0, -0.1], [-0.08, 0, 0.1]] },
 
     { "name": "hip_roll_l", "parent": "pelvis", "joint": { "origin": [0, -0.05, -0.08], "axis": [1, 0, 0], "limits": [-0.35, 0.35], "damping": 0.05 },
       "mass": 0.05, "com": [0, 0, 0], "inertia": [1e-5, 1e-5, 1e-5] },
     { "name": "thigh_l", "parent": "hip_roll_l", "joint": { "origin": [0, 0, 0], "axis": [0, 0, 1], "limits": [-0.35, 1.0], "damping": 0.05 },
       "mass": 0.8, "com": [0, -0.125, 0], "inertia": [0.0042, 0.0003, 0.0042] },
     { "name": "shin_l", "parent": "thigh_l", "joint": { "origin": [0, -0.25, 0], "axis": [0, 0, 1], "limits": [-1.5, 0], "damping": 0.05 },
-      "mass": 0.6, "com": [0, -0.125, 0], "inertia": [0.0031, 0.0002, 0.0031] },
+      "mass": 0.6, "com": [0, -0.125, 0], "inertia": [0.0031, 0.0002, 0.0031], "contacts": [[0.03, 0, 0]] },
     { "name": "foot_l", "parent": "shin_l", "joint": { "origin": [0, -0.25, 0], "axis": [0, 0, 1], "limits": [-0.5, 0.4], "damping": 0.05 },
-      "mass": 0.3, "com": [0.03, -0.03, 0], "inertia": [0.0002, 0.0004, 0.0003] },
+      "mass": 0.3, "com": [0.03, -0.03, 0], "inertia": [0.0002, 0.0004, 0.0003],
+      "contacts": [[-0.05, -0.05, -0.035], [-0.05, -0.05, 0.035], [0.12, -0.05, -0.035], [0.12, -0.05, 0.035]] },
 
     { "name": "hip_roll_r", "parent": "pelvis", "joint": { "origin": [0, -0.05, 0.08], "axis": [1, 0, 0], "limits": [-0.35, 0.35], "damping": 0.05 },
       "mass": 0.05, "com": [0, 0, 0], "inertia": [1e-5, 1e-5, 1e-5] },
     { "name": "thigh_r", "parent": "hip_roll_r", "joint": { "origin": [0, 0, 0], "axis": [0, 0, 1], "limits": [-0.35, 1.0], "damping": 0.05 },
       "mass": 0.8, "com": [0, -0.125, 0], "inertia": [0.0042, 0.0003, 0.0042] },
     { "name": "shin_r", "parent": "thigh_r", "joint": { "origin": [0, -0.25, 0], "axis": [0, 0, 1], "limits": [-1.5, 0], "damping": 0.05 },
-      "mass": 0.6, "com": [0, -0.125, 0], "inertia": [0.0031, 0.0002, 0.0031] },
+      "mass": 0.6, "com": [0, -0.125, 0], "inertia": [0.0031, 0.0002, 0.0031], "contacts": [[0.03, 0, 0]] },
     { "name": "foot_r", "parent": "shin_r", "joint": { "origin": [0, -0.25, 0], "axis": [0, 0, 1], "limits": [-0.5, 0.4], "damping": 0.05 },
-      "mass": 0.3, "com": [0.03, -0.03, 0], "inertia": [0.0002, 0.0004, 0.0003] }
+      "mass": 0.3, "com": [0.03, -0.03, 0], "inertia": [0.0002, 0.0004, 0.0003],
+      "contacts": [[-0.05, -0.05, -0.035], [-0.05, -0.05, 0.035], [0.12, -0.05, -0.035], [0.12, -0.05, 0.035]] }
   ],
   "cylinders": [
     { "name": "hip_pitch_l", "base": { "link": "pelvis", "point": [0.06, -0.045, -0.08] }, "rod": { "link": "thigh_l", "point": [0, -0.20, 0] },
