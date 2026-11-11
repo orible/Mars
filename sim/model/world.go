@@ -55,6 +55,10 @@ type Harness struct {
 	Height   float64 // pelvis height to hold
 	Target   geom.V3 // where the harness wants the pelvis now (moves with Vel)
 	Force    geom.V3 // last force applied (for display)
+	// Gentle caps the help for getting up off the floor: at most half the
+	// weight, and an uprighting moment of at most mass·g·0.15 m, so the
+	// legs still have to do the rising.
+	Gentle bool
 }
 
 // World is one simulated robot: either on the test stand (pelvis bolted
@@ -323,7 +327,7 @@ func (w *World) harness(dt float64) {
 	s := h.Strength
 	f := geom.V3{
 		s * (k*(h.Target[0]-p[0]) + c*(h.Vel[0]-v[0])),
-		// Hands hold up to half the weight and can only lift, never push down.
+		// Hands lift, never push down.
 		math.Max(0, s*(0.5*mass*9.81+k*(h.Height-p[1])-c*v[1])),
 		s * (k*(h.Target[2]-p[2]) + c*(h.Vel[2]-v[2])),
 	}
@@ -331,6 +335,12 @@ func (w *World) harness(dt float64) {
 	tilt := up.Cross(geom.V3{0, 1, 0}) // axis that turns the pelvis back upright, length sin(tilt)
 	wh := geom.V3{w.Base.W[0], 0, w.Base.W[2]}
 	tq := tilt.Scale(s * 40 * mass).Sub(wh.Scale(s * 4 * mass))
+	if h.Gentle { // helping it up off the floor: help, do not crane it up
+		f[1] = math.Min(f[1], s*0.5*mass*9.81)
+		if lim := s * mass * 9.81 * 0.15; tq.Norm() > lim {
+			tq = tq.Scale(lim / tq.Norm())
+		}
+	}
 	h.Force = f
 	for i := 0; i < 3; i++ {
 		w.gen[i] += f[i]

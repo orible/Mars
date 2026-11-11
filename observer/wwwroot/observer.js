@@ -65,7 +65,8 @@ function report(state) {
 function trainingSummary(s) {
   const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "–");
   const parts = [`training "${s.scenario}" iteration ${s.iter} (${s.elapsed})`, `start level ${s.startLevel.toFixed(2)}`];
-  if (s.floorStarts) parts.push(`got up ${s.gotUp}/${s.floorStarts} (${pct(s.gotUp, s.floorStarts)})`);
+  if (s.floorStarts) parts.push(`got up alone ${s.gotUp}/${s.floorStarts} (${pct(s.gotUp, s.floorStarts)})`);
+  if (s.heldFloor) parts.push(`held ${s.heldGotUp}/${s.heldFloor} (${pct(s.heldGotUp, s.heldFloor)})`);
   if (s.soloEpisodes) parts.push(`unheld falls ${s.soloFalls}/${s.soloEpisodes}`);
   if (s.assist > 0) parts.push(`harness ${s.assist.toFixed(2)}`);
   parts.push(`return ${s.meanReturn.toFixed(1)}`);

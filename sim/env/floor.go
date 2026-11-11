@@ -101,7 +101,7 @@ func balancedSquat(w *model.World, knee float64) (geom.M3, []float64, bool) {
 	var bestQ []float64
 	for lean := 0.0; lean <= 1.2; lean += 0.05 { // pelvis pitched forward (nose down)
 		r := geom.AxisAngle(geom.V3{0, 0, 1}, -lean)
-		for hip := 0.2; hip <= 1.57; hip += 0.05 {
+		for hip := 0.2; hip <= 1.95; hip += 0.05 {
 			q := make([]float64, n)
 			for i, role := range roles {
 				switch role {

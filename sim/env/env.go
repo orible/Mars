@@ -121,9 +121,9 @@ func (e *Env) Reset() {
 	// down count as floor starts for the get-up statistics.
 	e.StartedLying = !e.up
 	e.prevPot = e.potential()
-	e.Assisted = !e.StartedLying && e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
+	e.Assisted = (!e.StartedLying || e.Cfg.AssistFloor) && e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
 	if e.Assisted {
-		e.W.Harness = model.Harness{Strength: e.Cfg.Assist, Height: e.h0, Target: e.W.Base.P}
+		e.W.Harness = model.Harness{Strength: e.Cfg.Assist, Height: e.h0, Target: e.W.Base.P, Gentle: e.StartedLying}
 	}
 }
 
@@ -205,7 +205,9 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 	case e.up && w.Fallen():
 		e.Falls++
 		up = false
-		w.Harness.Strength = 0 // let go; it has to get itself up
+		if !e.Cfg.AssistFloor {
+			w.Harness.Strength = 0 // let go; it has to get itself up
+		}
 		if e.Cfg.EndOnFall {
 			return 0, true, false
 		}

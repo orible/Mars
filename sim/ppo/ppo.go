@@ -57,8 +57,10 @@ type Stats struct {
 	Samples              int
 	Episodes, Falls      int
 	MeanReturn, MeanSecs float64 // over episodes that ended this iteration
-	// Episodes that started on the floor, and how many got up.
+	// Episodes that started on the floor unheld, and how many got up.
 	LyingEpisodes, GotUp int
+	// Floor starts held by the harness, and how many got up.
+	HeldFloor, HeldGotUp int
 	// Episodes that started standing without the harness: the robot's
 	// real ability.
 	SoloEpisodes, SoloFalls int
@@ -201,7 +203,12 @@ func (t *Trainer) Iterate() Stats {
 			if ep.fell {
 				st.Falls++
 			}
-			if ep.lying {
+			if ep.lying && ep.assisted {
+				st.HeldFloor++
+				if ep.gotUp {
+					st.HeldGotUp++
+				}
+			} else if ep.lying {
 				st.LyingEpisodes++
 				if ep.gotUp {
 					st.GotUp++

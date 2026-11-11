@@ -210,6 +210,36 @@ func TestRiseReferences(t *testing.T) {
 	}
 }
 
+// The harness on a floor start should help (lift the pelvis off the
+// floor) but not do the job alone: with the valves closed it must not
+// stand the robot up by itself.
+func TestFloorHarnessHelpsButDoesNotLift(t *testing.T) {
+	sc, _ := LoadScenario("getup")
+	sc.RandomBodyFrac = 0
+	e := New(biped(t), sc, 1)
+	for _, c := range []struct {
+		name string
+		d    float64
+	}{{"squat", 0}, {"kneel", 0.3}, {"lying", 0.9}} {
+		w := model.NewWorld(e.W.M, true)
+		floorPose(w, rand.New(rand.NewSource(3)), c.d)
+		for i := 0; i < int(0.3/PhysicsDt); i++ { // settle unheld
+			w.Step(PhysicsDt)
+		}
+		h0 := w.Base.P[1] / w.StandH()
+		w.Harness = model.Harness{Strength: 1, Height: w.StandH(), Target: w.Base.P, Gentle: true}
+		best := h0
+		for i := 0; i < int(3/PhysicsDt); i++ { // 3 s held, valves closed
+			w.Step(PhysicsDt)
+			best = math.Max(best, w.Base.P[1]/w.StandH())
+		}
+		t.Logf("%s: pelvis %.0f%% → best %.0f%% while held, upright %v, hands %.0f N", c.name, 100*h0, 100*best, w.Upright(), w.Harness.Force.Norm())
+		if w.Upright() {
+			t.Errorf("%s: the harness stood the robot up on its own", c.name)
+		}
+	}
+}
+
 // Each rung of the floor-start ladder should settle at rest without
 // blowing up; squatting, kneeling, sitting and lying all count as down.
 func TestFloorStartLadder(t *testing.T) {

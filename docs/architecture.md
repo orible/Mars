@@ -43,9 +43,12 @@ The sim is 3D from the start, because much of what makes the pelvis matter is 3D
   |---|---|---|---|
   | Hip yaw | 40° internal .. 45° external rotation | about 35–45° in, 45–50° out | turning, and toeing in or out |
   | Hip roll | 30° adduction .. 45° abduction | same | small |
-  | Hip pitch | −20° .. 90° | −20° .. 120° | about −10° .. 30° |
+  | Hip pitch | −20° .. 110° | −20° .. 120° | about −10° .. 30° |
   | Knee | 3° hyperextension lock .. 90° flexion | 0 .. 135° | about 0 .. 60° |
-  | Ankle | 45° plantar .. 20° dorsi | same | about 20° plantar .. 10° dorsi |
+  | Ankle | 45° plantar .. 35° dorsi | 45–50° plantar .. 20° dorsi (35–40° in a deep squat) | about 20° plantar .. 10° dorsi |
+
+  - **Widened to get up off the floor.** Hip flexion went from 90° to 110°, with the hip cylinder now running down the front of the thigh like a hip flexor (12 cm stroke, 25 mm minimum lever arm). Ankle dorsiflexion went from 20° to 35° (7 cm calf stroke, 39 mm arm).
+  - **Why:** at 90° and 20° a squat could not keep the weight over the feet while rising. Now the balanced squat start reaches 83° of knee bend.
 
   - **Hip yaw comes first in the chain** (pelvis → yaw → roll → pitch). The yaw link is a bracket that carries the roll and pitch cylinders' bases, so turning a leg never stretches them. A horizontal cylinder from the back of the pelvis to a lever on the bracket gives the full yaw range with a 25 mm minimum lever arm (about 11 N·m).
   - **Muscle placement is anatomical.** The knee cylinder is a "quad" down the front of the thigh to the front of the shin. The ankle cylinder is a "calf" down the back of the shin to the heel.
@@ -212,6 +215,10 @@ Most world-model basics are learned in simulation; real hardware only receives p
     - sit: 20°
     - lying: 13°
   - **The raw recordings stay out of git** (`sim/mocap/cmu-*`). Only the extracted keyframes, with attribution, are committed.
+- **Held while learning to get up.** In `getup`, 70% of floor starts are held by the harness in a gentle mode: it takes at most half the weight and gives at most mass·g·0.15 m of uprighting torque.
+  - **Tested:** it lifts a kneeling robot from 51% to 56% of standing height, and a lying one from 22% to 30%, but never stands it up on its own.
+  - **Fading:** the trainer fades it when more than 60% of held floor starts get up, and restores it below 30%.
+  - **Measuring:** unheld floor starts are logged separately ("got up alone") and drive the start-level curriculum.
 - **Longer practice:**
   - getup episodes last 20 s, so slow rises are not cut off;
   - each iteration collects 256 steps per environment;

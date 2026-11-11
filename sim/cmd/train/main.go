@@ -51,7 +51,7 @@ func writeJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-const csvHeader = "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level"
+const csvHeader = "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level,held_floor,held_got_up"
 
 // scenarioFile returns the scenario argument if it is a file, made
 // absolute so another process can load it.
@@ -163,18 +163,18 @@ func main() {
 	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s and %s",
 		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100*ecfg.RandomBodyFrac, *out, *logPath)
 	start := time.Now()
-	var heldEps, heldFalls, downEps, upEps []int
+	var heldEps, heldFalls, downEps, upEps, hfEps, hfUp []int
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
-		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d,%.3f\n",
+		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d,%.3f,%d,%d\n",
 			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
-			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp, floorLevel)
+			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp, floorLevel, s.HeldFloor, s.HeldGotUp)
 		fallRate := 0.0
 		if s.Episodes > 0 {
 			fallRate = float64(s.Falls) / float64(s.Episodes)
 		}
-		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d (level %.2f)  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
-			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, floorLevel, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
+		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d (level %.2f), held %d/%d  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
+			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, floorLevel, s.HeldGotUp, s.HeldFloor, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
 			time.Since(start).Round(time.Second))
 
 		// Reverse curriculum for getting up: start lower once it gets up
@@ -205,7 +205,7 @@ func main() {
 		// and bring them back if it starts falling again. Judged over the
 		// last 20 iterations (≥ 20 held episodes): single iterations end
 		// too few episodes and fade the harness on luck.
-		heldEps = append(heldEps, s.Episodes-s.SoloEpisodes-s.LyingEpisodes)
+		heldEps = append(heldEps, s.Episodes-s.SoloEpisodes-s.LyingEpisodes-s.HeldFloor)
 		heldFalls = append(heldFalls, s.AssistedFalls)
 		if len(heldEps) > 20 {
 			heldEps, heldFalls = heldEps[1:], heldFalls[1:]
@@ -214,7 +214,25 @@ func main() {
 		for k := range heldEps {
 			eps, falls = eps+heldEps[k], falls+heldFalls[k]
 		}
-		if level > 0 && len(heldEps) == 20 && eps >= 20 {
+		// With held floor starts, fade on how often held get-ups succeed.
+		hfEps, hfUp = append(hfEps, s.HeldFloor), append(hfUp, s.HeldGotUp)
+		if len(hfEps) > 20 {
+			hfEps, hfUp = hfEps[1:], hfUp[1:]
+		}
+		hd, hu := 0, 0
+		for k := range hfEps {
+			hd, hu = hd+hfEps[k], hu+hfUp[k]
+		}
+		if ecfg.AssistFloor && level > 0 && len(hfEps) == 20 && hd >= 20 {
+			rate := float64(hu) / float64(hd)
+			switch {
+			case rate > 0.6:
+				level = math.Max(0, level-0.01)
+			case rate < 0.3:
+				level = math.Min(1, level+0.01)
+			}
+			tr.SetAssist(level)
+		} else if level > 0 && len(heldEps) == 20 && eps >= 20 {
 			rate := float64(falls) / float64(eps)
 			switch {
 			case rate < 0.15:
@@ -234,6 +252,7 @@ func main() {
 			Iter: s.Iter, Elapsed: time.Since(start).Round(time.Second).String(),
 			StartLevel: floorLevel, Assist: level,
 			Episodes: s.Episodes, Falls: s.Falls, FloorStarts: s.LyingEpisodes, GotUp: s.GotUp,
+			HeldFloor: s.HeldFloor, HeldGotUp: s.HeldGotUp,
 			SoloEpisodes: s.SoloEpisodes, SoloFalls: s.SoloFalls, MeanReturn: s.MeanReturn,
 		}); err != nil {
 			log.Fatal(err)

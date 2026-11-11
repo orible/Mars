@@ -48,9 +48,14 @@ type Scenario struct {
 	// standing: the pelvis is held up and carried along the command, as a
 	// baby is held while it kicks. The trainer fades it as falls drop.
 	Assist float64 `json:"assist"`
-	// UnassistedFrac of standing starts never get the harness, so real
-	// ability is always being practised and measured.
+	// UnassistedFrac of starts never get the harness, so real ability is
+	// always being practised and measured.
 	UnassistedFrac float64 `json:"unassistedFrac"`
+	// AssistFloor also holds floor starts: the harness takes part of the
+	// weight and helps the pelvis upright while the legs learn to push,
+	// and stays on through falls. The trainer fades it as held get-ups
+	// succeed.
+	AssistFloor bool `json:"assistFloor"`
 }
 
 // allRises are the human getting-up references: every built-in one (one
@@ -66,6 +71,7 @@ var Scenarios = map[string]Scenario{
 	"getup": {
 		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
 		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: allRises,
+		Assist: 1, UnassistedFrac: 0.3, AssistFloor: true,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 20,
 	},
 	"stand": {
@@ -102,6 +108,8 @@ type TrainingStatus struct {
 	Falls        int     `json:"falls"`
 	FloorStarts  int     `json:"floorStarts"`
 	GotUp        int     `json:"gotUp"`
+	HeldFloor    int     `json:"heldFloor"`
+	HeldGotUp    int     `json:"heldGotUp"`
 	SoloEpisodes int     `json:"soloEpisodes"`
 	SoloFalls    int     `json:"soloFalls"`
 	MeanReturn   float64 `json:"meanReturn"`

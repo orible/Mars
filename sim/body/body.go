@@ -221,10 +221,10 @@ func Random(rng *rand.Rand) Body {
 		thM, shM, ftM := u(0.5, 1.2), u(0.4, 0.9), u(0.2, 0.5)
 		// Joint ranges follow a human range-of-motion chart where a single
 		// cylinder can reach: hip roll 30° adduction to 45° abduction, hip
-		// −20°..90° (human 120°), knee 90° flexion (human 135°; a straight
+		// −20°..110° (human 120°), knee 90° flexion (human 135°; a straight
 		// quad cylinder loses its lever beyond that without a kneecap
-		// pulley) to a 3° hyperextension lock, ankle 45° plantar to 20°
-		// dorsi. On the left leg (z < 0) positive roll is abduction; the
+		// pulley) to a 3° hyperextension lock, ankle 45° plantar to 35°
+		// dorsi (widened from the 20° chart value so it can balance a squat). On the left leg (z < 0) positive roll is abduction; the
 		// right is mirrored.
 		// Hip yaw (when present): 40° internal, 45° external rotation, on a
 		// bracket that carries the roll and pitch cylinders' bases, so
@@ -250,13 +250,13 @@ func Random(rng *rand.Rand) Body {
 			return p.Sub(hip).Add(at)
 		}
 		link("hip_roll_"+s, rollParent, rollOrigin, geom.V3{1, 0, 0}, rollLo, rollHi, 0.05, geom.V3{}, geom.V3{1e-5, 1e-5, 1e-5})
-		link("thigh_"+s, "hip_roll_"+s, geom.V3{}, geom.V3{0, 0, 1}, -0.35, 1.57, thM, geom.V3{0, -th / 2, 0}, rodInertia(thM, th))
+		link("thigh_"+s, "hip_roll_"+s, geom.V3{}, geom.V3{0, 0, 1}, -0.35, 1.92, thM, geom.V3{0, -th / 2, 0}, rodInertia(thM, th))
 		// Front, back and outer side of the limb, so it rests on the floor
 		// when lying down instead of sinking through.
 		b.Links[len(b.Links)-1].Contacts = []geom.V3{{0.04, -th / 2, 0}, {-0.04, -th / 2, 0}, {0, -th / 2, z * 0.04}}
 		link("shin_"+s, "thigh_"+s, geom.V3{0, -th, 0}, geom.V3{0, 0, 1}, -1.57, 0.05, shM, geom.V3{0, -sh / 2, 0}, rodInertia(shM, sh))
 		b.Links[len(b.Links)-1].Contacts = []geom.V3{{0.03, 0, 0}, {0.03, -sh / 2, 0}, {-0.04, -sh / 2, 0}, {0, -sh / 2, z * 0.035}} // kneecap, shin
-		link("foot_"+s, "shin_"+s, geom.V3{0, -sh, 0}, geom.V3{0, 0, 1}, -0.79, 0.35, ftM, geom.V3{0.03, -0.03, 0}, geom.V3{2e-4, 4e-4, 3e-4})
+		link("foot_"+s, "shin_"+s, geom.V3{0, -sh, 0}, geom.V3{0, 0, 1}, -0.79, 0.61, ftM, geom.V3{0.03, -0.03, 0}, geom.V3{2e-4, 4e-4, 3e-4})
 		sole, heel, toe, half := -u(0.04, 0.06), -u(0.04, 0.06), u(0.09, 0.14), u(0.025, 0.045)
 		b.Links[len(b.Links)-1].Contacts = []geom.V3{{heel, sole, -half}, {heel, sole, half}, {toe, sole, -half}, {toe, sole, half}}
 
@@ -267,7 +267,7 @@ func Random(rng *rand.Rand) Body {
 		if hipYaw { // horizontal, from the back of the pelvis to a lever on the yaw bracket
 			cyl("hip_yaw_"+s, Anchor{"pelvis", jit(geom.V3{-0.12, -drop, z * (hw - 0.095)})}, Anchor{"hip_yaw_" + s, jit(geom.V3{0.015, 0, -z * 0.03})}, 0.05)
 		}
-		cyl("hip_pitch_"+s, Anchor{mount, jit(rel(geom.V3{0.055, 0.015 - drop, z * hw}))}, Anchor{"thigh_" + s, jit(geom.V3{-0.045, -0.88 * th, 0})}, 0.10)
+		cyl("hip_pitch_"+s, Anchor{mount, jit(rel(geom.V3{0.035, 0.05 - drop, z * hw}))}, Anchor{"thigh_" + s, jit(geom.V3{0.07, -0.96 * th, 0})}, 0.12)
 		if hipRoll {
 			cyl("hip_roll_"+s, Anchor{mount, jit(rel(geom.V3{0, -0.005 - drop, z * (hw - 0.045)}))}, Anchor{"thigh_" + s, jit(geom.V3{0, -0.64 * th, -z * 0.04})}, 0.06)
 		}
@@ -277,7 +277,7 @@ func Random(rng *rand.Rand) Body {
 		if doubleKnee { // a "hamstring" behind, diagonal to the front of the shin
 			cyl("knee_back_"+s, Anchor{"thigh_" + s, jit(geom.V3{-0.03, -0.12 * th, 0})}, Anchor{"shin_" + s, jit(geom.V3{0.045, -0.035, 0})}, 0.10)
 		}
-		cyl("ankle_"+s, Anchor{"shin_" + s, jit(geom.V3{-0.04, -0.34 * sh, 0})}, Anchor{"foot_" + s, jit(geom.V3{-0.05, -0.01, 0})}, 0.06)
+		cyl("ankle_"+s, Anchor{"shin_" + s, jit(geom.V3{-0.06, -0.22 * sh, 0})}, Anchor{"foot_" + s, jit(geom.V3{-0.05, -0.01, 0})}, 0.07)
 	}
 	b.Name = fmt.Sprintf("random-%d", len(b.Cylinders))
 	return b
