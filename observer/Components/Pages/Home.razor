@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @implements IAsyncDisposable
 @inject IJSRuntime JS
+@using System.Net.Http.Json
 
 <PageTitle>Mars observer</PageTitle>
 
@@ -19,9 +20,31 @@
     <span>Sim time: <strong>@simTime.ToString("0.0") s</strong></span>
 </section>
 
+<section class="scenario" aria-label="Training scenario">
+    <label>
+        Scenario
+        <select @bind="selected">
+            @foreach (var s in scenarios)
+            {
+                <option value="@s.Name" title="@s.Description">@s.Name</option>
+            }
+        </select>
+    </label>
+    <label title="Floor starts: 0 = deep squat, 0.25 kneeling, 0.5 sitting, 0.75–1 lying flat">
+        Start level <input type="range" min="0" max="1" step="0.05" @bind="level" @bind:event="oninput" />
+        <span class="num">@level.ToString("0.00")</span>
+    </label>
+    <button @onclick="Watch">Watch</button>
+    <button @onclick="Follow" class="@(following ? "on" : "")">Follow training</button>
+    <span class="muted">@scenarioNote</span>
+</section>
+<p class="watching">Watching <strong>@watching</strong>@(following ? " (following training)" : "") · @trainingLine</p>
+
 <canvas @ref="canvas" class="view" width="1100" height="720"></canvas>
 
 @code {
+    private static readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(3) };
+
     private ElementReference canvas;
     private IJSObjectReference? module;
     private DotNetObjectReference<Home>? self;
@@ -33,6 +56,18 @@
     private int actuatorCount;
     private double mass;
     private double simTime;
+
+    private record ScenarioInfo(string Name, string Description);
+    private List<ScenarioInfo> scenarios = new();
+    private string selected = "getup";
+    private double level = 1;
+    private string scenarioNote = "";
+    private string watching = "–";
+    private bool following;
+    private string trainingLine = "no training run found";
+
+    // ws://host:port/ws → http://host:port
+    private string SimBase => url.Replace("wss://", "https://").Replace("ws://", "http://").Replace("/ws", "");
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -46,10 +81,44 @@
     {
         if (module is null || self is null) return;
         await module.InvokeVoidAsync("connect", url, canvas, self);
+        await LoadScenarios();
+    }
+
+    private async Task LoadScenarios()
+    {
+        try
+        {
+            scenarios = await http.GetFromJsonAsync<List<ScenarioInfo>>($"{SimBase}/scenarios") ?? new();
+            scenarioNote = scenarios.FirstOrDefault(s => s.Name == selected)?.Description ?? "";
+        }
+        catch (Exception e)
+        {
+            scenarioNote = $"cannot list scenarios: {e.Message}";
+        }
+    }
+
+    private async Task Watch() => await Post(new { name = selected, startLevel = level, follow = false });
+
+    private async Task Follow() => await Post(new { follow = true });
+
+    private async Task Post(object body)
+    {
+        try
+        {
+            var r = await http.PostAsJsonAsync($"{SimBase}/scenario", body);
+            scenarioNote = r.IsSuccessStatusCode
+                ? scenarios.FirstOrDefault(s => s.Name == selected)?.Description ?? ""
+                : await r.Content.ReadAsStringAsync();
+        }
+        catch (Exception e)
+        {
+            scenarioNote = $"cannot reach the sim server: {e.Message}";
+        }
     }
 
     [JSInvokable]
-    public void OnStatus(string connection, string body, int rev, int actuators, double bodyMass, double t)
+    public void OnStatus(string connection, string body, int rev, int actuators, double bodyMass, double t,
+        string scenario, double startLevel, bool follow, string training)
     {
         state = connection;
         bodyName = body;
@@ -57,6 +126,9 @@
         actuatorCount = actuators;
         mass = bodyMass;
         simTime = t;
+        watching = string.IsNullOrEmpty(scenario) ? "–" : $"{scenario} (start level {startLevel:0.00})";
+        following = follow;
+        trainingLine = string.IsNullOrEmpty(training) ? "no training run found" : training;
         StateHasChanged();
     }
 

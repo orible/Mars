@@ -51,6 +51,18 @@ func writeJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
+// scenarioFile returns the scenario argument if it is a file, made
+// absolute so another process can load it.
+func scenarioFile(arg string) string {
+	if !strings.HasSuffix(arg, ".json") {
+		return ""
+	}
+	if abs, err := filepath.Abs(arg); err == nil {
+		return abs
+	}
+	return arg
+}
+
 func readJSON(path string, v any) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -72,6 +84,7 @@ func main() {
 	flag.IntVar(&cfg.Envs, "envs", cfg.Envs, "parallel environments")
 	flag.IntVar(&cfg.Steps, "steps", cfg.Steps, "policy steps per environment per iteration")
 	flag.Float64Var(&cfg.LR, "lr", cfg.LR, "policy learning rate")
+	startLevel := flag.Float64("start-level", -1, "how far down floor starts go, 0 crouched … 1 lying flat (default: the scenario's); moved automatically in curriculum scenarios")
 	assist := flag.Float64("assist", -1, "starting harness strength 0–1 (walk default 1, stand default 0); faded automatically as assisted falls drop")
 	flag.Parse()
 
@@ -113,7 +126,11 @@ func main() {
 	if *assist >= 0 {
 		ecfg.Assist = *assist
 	}
+	if *startLevel >= 0 {
+		ecfg.StartLevel = *startLevel
+	}
 	level := ecfg.Assist
+	floorLevel := ecfg.StartLevel
 	envs := make([]*env.Env, cfg.Envs)
 	for i := range envs {
 		envs[i] = env.New(base, ecfg, *seed*1000+int64(i))
@@ -129,25 +146,49 @@ func main() {
 	}
 	defer csv.Close()
 	if info, _ := csv.Stat(); info.Size() == 0 {
-		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up")
+		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level")
 	}
 
 	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s and %s",
 		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100*ecfg.RandomBodyFrac, *out, *logPath)
 	start := time.Now()
-	var heldEps, heldFalls []int
+	var heldEps, heldFalls, downEps, upEps []int
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
-		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d\n",
+		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d,%.3f\n",
 			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
-			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp)
+			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp, floorLevel)
 		fallRate := 0.0
 		if s.Episodes > 0 {
 			fallRate = float64(s.Falls) / float64(s.Episodes)
 		}
-		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
-			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
+		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d (level %.2f)  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
+			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, floorLevel, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
 			time.Since(start).Round(time.Second))
+
+		// Reverse curriculum for getting up: start lower once it gets up
+		// from where it starts now, and higher again if it stops managing.
+		downEps = append(downEps, s.LyingEpisodes)
+		upEps = append(upEps, s.GotUp)
+		if len(downEps) > 20 {
+			downEps, upEps = downEps[1:], upEps[1:]
+		}
+		if ecfg.Curriculum {
+			d, u := 0, 0
+			for k := range downEps {
+				d, u = d+downEps[k], u+upEps[k]
+			}
+			if len(downEps) == 20 && d >= 20 {
+				rate := float64(u) / float64(d)
+				switch {
+				case rate > 0.5:
+					floorLevel = math.Min(1, floorLevel+0.02)
+				case rate < 0.1:
+					floorLevel = math.Max(0.05, floorLevel-0.01)
+				}
+				tr.SetStartLevel(floorLevel)
+			}
+		}
 
 		// Fade the helping hands as the robot stops falling while held,
 		// and bring them back if it starts falling again. Judged over the
@@ -173,6 +214,17 @@ func main() {
 			tr.SetAssist(level)
 		}
 		if err := writeJSON(*out, pol); err != nil {
+			log.Fatal(err)
+		}
+		// What training is practising right now, so the sim server can
+		// follow along (-follow, or "Follow training" in the observer).
+		if err := writeJSON(env.StatusPath(*out), env.TrainingStatus{
+			Scenario: ecfg.Name, Description: ecfg.Description, File: scenarioFile(*scenarioArg),
+			Iter: s.Iter, Elapsed: time.Since(start).Round(time.Second).String(),
+			StartLevel: floorLevel, Assist: level,
+			Episodes: s.Episodes, Falls: s.Falls, FloorStarts: s.LyingEpisodes, GotUp: s.GotUp,
+			SoloEpisodes: s.SoloEpisodes, SoloFalls: s.SoloFalls, MeanReturn: s.MeanReturn,
+		}); err != nil {
 			log.Fatal(err)
 		}
 		if err := writeJSON(valPath, val); err != nil {

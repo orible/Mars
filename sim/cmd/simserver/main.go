@@ -101,6 +101,11 @@ type Frame struct {
 	Commander string          `json:"commander"`
 	Hands     geom.V3         `json:"hands"` // harness force on the pelvis, N (zero when not held)
 	Joints    []JointFrame    `json:"joints"`
+	// What is being watched, and the training run it may be following.
+	Scenario   string              `json:"scenario"`
+	StartLevel float64             `json:"startLevel"`
+	Follow     bool                `json:"follow"`
+	Training   *env.TrainingStatus `json:"training"`
 }
 
 // JointFrame is one joint's angle within its limits. Kind names the
@@ -158,6 +163,88 @@ type sim struct {
 	rng      *rand.Rand
 	scen     env.Scenario
 	up       bool // upright (or stumbling, not yet fallen)
+	// Scenario switching: from the observer's picker, or from the
+	// trainer's status file while following training.
+	switches <-chan env.Scenario
+	ctl      *control
+}
+
+// control is the scenario state shared with the HTTP endpoints and the
+// training-status watcher.
+type control struct {
+	mu       sync.Mutex
+	follow   bool
+	training *env.TrainingStatus // latest status from the trainer, if any
+}
+
+func (c *control) get() (bool, *env.TrainingStatus) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.follow, c.training
+}
+
+// applyScenario switches what is being watched and starts it afresh.
+func (s *sim) applyScenario(sc env.Scenario) {
+	s.scen = sc
+	s.push = sc.PushEvery
+	s.restart()
+	log.Printf("watching scenario %q (start level %.2f): %s", sc.Name, sc.StartLevel, sc.Description)
+}
+
+// watchTraining polls the trainer's status file. It keeps the latest
+// status for frames and, while following, switches the watched scenario
+// and start level to match training.
+func watchTraining(ctx context.Context, path string, ctl *control, out chan<- env.Scenario) {
+	var last time.Time
+	var applied string
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.ModTime().After(last) {
+			follow, _ := ctl.get()
+			if !follow {
+				applied = ""
+			}
+			continue
+		}
+		last = info.ModTime()
+		data, err := os.ReadFile(path)
+		var st env.TrainingStatus
+		if err != nil || json.Unmarshal(data, &st) != nil {
+			continue
+		}
+		ctl.mu.Lock()
+		ctl.training = &st
+		follow := ctl.follow
+		ctl.mu.Unlock()
+		if !follow {
+			applied = ""
+			continue
+		}
+		name := st.Scenario
+		if st.File != "" {
+			name = st.File
+		}
+		// Re-apply when the scenario changes or the level moves noticeably.
+		key := fmt.Sprintf("%s@%.1f", name, st.StartLevel)
+		if key == applied {
+			continue
+		}
+		sc, err := env.LoadScenario(name)
+		if err != nil {
+			log.Printf("cannot follow training scenario %q: %v", name, err)
+			continue
+		}
+		sc.StartLevel, sc.Assist = st.StartLevel, 0
+		applied = key
+		out <- sc
+	}
 }
 
 func (s *sim) reset(b body.Body) error {
@@ -188,6 +275,9 @@ func (s *sim) control() {
 	select {
 	case p := <-s.policies:
 		s.pol = p
+	case sc := <-s.switches:
+		s.applyScenario(sc)
+		return
 	default:
 	}
 	if !s.hold && s.tick%env.PolicyEvery == 0 {
@@ -235,8 +325,10 @@ func (s *sim) restart() {
 	s.up = true
 	s.newWorld(geom.V3{})
 	if s.floating && s.rng.Float64() < s.scen.LyingFrac {
-		env.LieDown(s.world, s.rng)
-		s.up, s.fallenAt = false, t
+		env.FloorStart(s.world, s.rng, s.scen.StartLevel)
+		if !s.world.Upright() {
+			s.up, s.fallenAt = false, t
+		}
 	}
 }
 
@@ -304,6 +396,8 @@ func (s *sim) frame() Frame {
 	if s.external {
 		f.Commander = "external (POST /command)"
 	}
+	f.Scenario, f.StartLevel = s.scen.Name, s.scen.StartLevel
+	f.Follow, f.Training = s.ctl.get()
 	if o, ok := s.tracker.Objective(); ok {
 		f.Objective = &o
 	}
@@ -446,6 +540,8 @@ func main() {
 	stand := flag.Bool("stand", false, "test stand: bolt the pelvis to the world instead of standing on the floor")
 	hold := flag.Bool("hold", false, "close every valve (cylinders lock the joints) instead of running the policy")
 	push := flag.Float64("push", -1, "push the robot sideways on average every this many seconds (0 = never; default: the scenario's)")
+	startLevel := flag.Float64("start-level", -1, "floor starts: 0 crouched … 1 lying flat (default: the scenario's)")
+	follow := flag.Bool("follow", false, "follow the training run: watch whatever scenario and start level the trainer writing -policy is practising")
 	scenarioArg := flag.String("scenario", "life", "scenario to watch ("+strings.Join(env.ScenarioNames(), ", ")+", or a .json file): whether it walks, starts on the floor, and is reset or left to get up after a fall")
 	speed := flag.Float64("speed", 1, "simulated seconds per wall-clock second; 0 = as fast as one core allows (the trainer always runs flat out on every core)")
 	assist := flag.Float64("assist", 0, "harness strength 0–1: hold the pelvis up and carry it along the command, as in early training")
@@ -471,6 +567,9 @@ func main() {
 	if *push < 0 {
 		*push = scen.PushEvery
 	}
+	if *startLevel >= 0 {
+		scen.StartLevel = *startLevel
+	}
 	log.Printf("scenario %q: %s", scen.Name, scen.Description)
 
 	if *checkOnly {
@@ -490,6 +589,11 @@ func main() {
 		pol = p
 		go watchPolicy(ctx, *ckpt, policies)
 	}
+	ctl := &control{follow: *follow}
+	switches := make(chan env.Scenario, 1)
+	if *ckpt != "" {
+		go watchTraining(ctx, env.StatusPath(*ckpt), ctl, switches)
+	}
 
 	bodies := make(chan body.Body, 1)
 	if *randomEvery > 0 {
@@ -506,6 +610,7 @@ func main() {
 	var latest atomic.Pointer[[]byte]
 	go func() {
 		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng, scen: scen,
+			switches: switches, ctl: ctl,
 			worldCfg: worldCfg, external: *commander == "external", llm: link, assist: *assist,
 			loop: command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, rng)}
 		for s.world == nil {
@@ -573,6 +678,55 @@ func main() {
 				sent = d
 			}
 		}
+	})
+
+	// Scenario picker for the observer: list what can be watched, and
+	// switch to a scenario (or to following the training run).
+	http.HandleFunc("/scenarios", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(env.ListScenarios("scenarios"))
+	})
+	http.HandleFunc("/scenario", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `POST {"name": "getup", "startLevel": 0.5} or {"follow": true}`, http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Name       string   `json:"name"`
+			StartLevel *float64 `json:"startLevel"`
+			Follow     bool     `json:"follow"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctl.mu.Lock()
+		ctl.follow = req.Follow
+		ctl.mu.Unlock()
+		if req.Follow {
+			if *ckpt == "" {
+				http.Error(w, "nothing to follow: start the sim server with -policy pointing at the training checkpoint", http.StatusConflict)
+				return
+			}
+			fmt.Fprintln(w, `{"follow": true}`)
+			return
+		}
+		sc, err := env.LoadScenario(req.Name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.StartLevel != nil {
+			sc.StartLevel = math.Max(0, math.Min(1, *req.StartLevel))
+		}
+		select {
+		case switches <- sc:
+		default:
+			http.Error(w, "a switch is already pending; try again", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(env.ScenarioInfo{Name: sc.Name, Description: sc.Description})
 	})
 
 	// The LLM loop over HTTP: read what the robot perceives, reply with a

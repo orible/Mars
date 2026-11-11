@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -25,8 +26,13 @@ type Scenario struct {
 	Walk  bool               `json:"walk"`
 	World world.RandomConfig `json:"world"`
 
-	LyingFrac float64 `json:"lyingFrac"` // fraction of episodes that start lying on the floor
+	LyingFrac float64 `json:"lyingFrac"` // fraction of episodes that start on the floor
 	EndOnFall bool    `json:"endOnFall"` // a fall ends the episode; otherwise it must get back up
+	// StartLevel is how far down floor starts go: 0 crouched … 1 lying
+	// flat (see FloorStart). With Curriculum the trainer moves it up as
+	// get-ups succeed and back down if they stop.
+	StartLevel float64 `json:"startLevel"`
+	Curriculum bool    `json:"curriculum"`
 
 	RandomBodyFrac float64    `json:"randomBodyFrac"` // fraction of episodes on a random body instead of the base spec
 	EpisodeSeconds float64    `json:"episodeSeconds"`
@@ -49,8 +55,8 @@ func flatWorld() world.RandomConfig {
 // Scenarios are the built-ins.
 var Scenarios = map[string]Scenario{
 	"getup": {
-		Description: "start lying on the back, front or a side and get up, then stay up; the kicking and pushing a baby learns on the floor",
-		World:       flatWorld(), LyingFrac: 1, EndOnFall: false,
+		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
+		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 10,
 	},
 	"stand": {
@@ -66,10 +72,55 @@ var Scenarios = map[string]Scenario{
 	},
 	"life": {
 		Description: "everything at once: start on the floor or standing, get up, walk where told, get pushed, fall and get back up",
-		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false,
+		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false, StartLevel: 1,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 15, PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3},
 		Assist: 0.5, UnassistedFrac: 0.3,
 	},
+}
+
+// TrainingStatus is what a training run is practising right now. The
+// trainer writes it next to the checkpoint every iteration; the sim server
+// reads it to follow the training course live.
+type TrainingStatus struct {
+	Scenario     string  `json:"scenario"`
+	Description  string  `json:"description"`
+	File         string  `json:"file,omitempty"` // scenario file, if not a built-in
+	Iter         int     `json:"iter"`
+	Elapsed      string  `json:"elapsed"`
+	StartLevel   float64 `json:"startLevel"`
+	Assist       float64 `json:"assist"`
+	Episodes     int     `json:"episodes"`
+	Falls        int     `json:"falls"`
+	FloorStarts  int     `json:"floorStarts"`
+	GotUp        int     `json:"gotUp"`
+	SoloEpisodes int     `json:"soloEpisodes"`
+	SoloFalls    int     `json:"soloFalls"`
+	MeanReturn   float64 `json:"meanReturn"`
+}
+
+// StatusPath is where the trainer writing checkpoint ckpt reports its
+// status: checkpoints/policy.json → checkpoints/policy.status.json.
+func StatusPath(ckpt string) string { return strings.TrimSuffix(ckpt, ".json") + ".status.json" }
+
+// ScenarioInfo describes one scenario for pickers.
+type ScenarioInfo struct {
+	Name        string `json:"name"` // built-in name or file path
+	Description string `json:"description"`
+}
+
+// ListScenarios returns the built-ins and the scenario files in dir.
+func ListScenarios(dir string) []ScenarioInfo {
+	var out []ScenarioInfo
+	for _, n := range ScenarioNames() {
+		out = append(out, ScenarioInfo{n, Scenarios[n].Description})
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	for _, f := range files {
+		if s, err := LoadScenario(f); err == nil {
+			out = append(out, ScenarioInfo{filepath.ToSlash(f), s.Description})
+		}
+	}
+	return out
 }
 
 // ScenarioNames lists the built-ins.
@@ -126,8 +177,8 @@ func (s Scenario) Validate() error {
 	switch {
 	case s.EpisodeSeconds <= 0:
 		return fmt.Errorf("scenario %q: episodeSeconds must be positive", s.Name)
-	case !in01(s.LyingFrac) || !in01(s.RandomBodyFrac) || !in01(s.Assist) || !in01(s.UnassistedFrac):
-		return fmt.Errorf("scenario %q: lyingFrac, randomBodyFrac, assist and unassistedFrac must be within 0–1", s.Name)
+	case !in01(s.LyingFrac) || !in01(s.RandomBodyFrac) || !in01(s.Assist) || !in01(s.UnassistedFrac) || !in01(s.StartLevel):
+		return fmt.Errorf("scenario %q: lyingFrac, randomBodyFrac, assist, unassistedFrac and startLevel must be within 0–1", s.Name)
 	case s.World.Count < 1 || s.World.Arrive <= 0 || s.World.Friction[0] <= 0 || s.World.Friction[1] < s.World.Friction[0]:
 		return fmt.Errorf("scenario %q: world needs count ≥ 1, arrive > 0 and a friction range", s.Name)
 	case s.PushEvery < 0 || s.PushSpeed[1] < s.PushSpeed[0]:

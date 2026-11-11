@@ -172,6 +172,15 @@ Most world-model basics are learned in simulation; real hardware only receives p
 - **Floor starts.** Episodes can start lying on the back, front or a side, with the legs at random angles. Contact points on the thighs, shins and pelvis corners let the body rest on the floor.
 - **A fall is not the end.** Being down pays little. Getting higher and more upright pays as it happens (potential-based shaping, so it cannot be farmed). Being up pays far more and switches to the command-following reward.
 - **Getting up is part of the same skill.** While the robot is down, the LLM loop is told it has fallen and its command is to stand still.
+- **Reverse curriculum for getting up,** the way babies come to it. Floor starts go down a ladder, and the trainer moves the start level deeper as get-ups succeed:
+  - a squat balanced over flat feet
+  - kneeling
+  - sitting
+  - lying on the back, front or side
+- **What the tests show so far:**
+  - **Strength:** the quads straighten the knees under the full weight and lift the pelvis to 91% of standing height.
+  - **Balance:** this is the hard part. The squat already uses the hip's 90° flexion and the ankle's 20° dorsiflexion limits, so there is little range left to keep the weight over the feet on the way up. Humans have about 120° and 35–40°. A hand-written controller rises and then sits back down.
+  - **If training cannot find a way,** the hardware answer is more hip flexion and ankle dorsiflexion range.
 - **Scenarios** (`-scenario` on the trainer and the sim server) choose the mix:
   - `getup`: always start on the floor.
   - `stand`: stand through pushes.

@@ -374,9 +374,10 @@ func (w *World) Fallen() bool {
 }
 
 // Upright reports a robot that is standing: pelvis within 30° of
-// vertical and at least 70% of standing height.
+// vertical and at least 86% of standing height (a 90° squat, about 83%,
+// is not up; walking stays around 95%).
 func (w *World) Upright() bool {
-	return !w.Floating || (w.Up()[1] > 0.85 && w.Base.P[1] > 0.7*w.standH)
+	return !w.Floating || (w.Up()[1] > 0.85 && w.Base.P[1] > 0.86*w.standH)
 }
 
 // StandH is the neutral standing pelvis height.

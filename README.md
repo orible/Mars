@@ -90,6 +90,8 @@ cd sim && go run ./cmd/simserver -policy checkpoints/policy.json -scenario getup
 
 Add `-world worlds/flat.json` to walk a hand-made route instead of random objectives.
 
+Watch the training course from the observer. The scenario bar picks any scenario and start level to watch (Watch). Follow training mirrors whatever the trainer is practising right now, including the start level the curriculum has reached, and shows its latest numbers. Start the sim server with `-follow` to begin in that mode.
+
 Let an LLM drive the robot instead of the scripted stand-in. Read `GET http://localhost:8080/perception` for the prompt, and post its reply, such as `{"heading_deg": -20, "speed": 0.3}`, to `POST /command`:
 
 ```bash

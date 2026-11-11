@@ -65,6 +65,22 @@ body {
 
 .summary strong { color: var(--text); }
 
+.scenario {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 6px;
+    color: var(--muted-text);
+}
+.scenario label { display: flex; align-items: center; gap: 6px; }
+.scenario select, .scenario button { padding: 4px 8px; }
+.scenario .num { min-width: 3ch; color: var(--text); }
+.scenario button.on { outline: 2px solid var(--accent); }
+.scenario .muted { flex: 1 1 300px; font-size: 0.9em; }
+.watching { margin: 0 0 10px; color: var(--muted-text); }
+.watching strong { color: var(--text); }
+
 .view {
     width: 100%;
     max-width: 1100px;

@@ -95,12 +95,18 @@ func (e *Env) Reset() {
 	e.Cmd = command.Stop
 	e.step = 0
 	e.Falls, e.GetUps = 0, 0
-	e.StartedLying = e.rng.Float64() < e.Cfg.LyingFrac
-	if e.StartedLying {
-		e.LieDown()
+	if e.rng.Float64() < e.Cfg.LyingFrac {
+		FloorStart(e.W, e.rng, e.Cfg.StartLevel)
+		for i := 0; i < int(0.3/PhysicsDt); i++ { // settle at rest, valves closed
+			e.W.Step(PhysicsDt)
+		}
+		e.W.T = 0
 	}
 	e.prevP = e.W.Base.P
 	e.up = e.W.Upright()
+	// A shallow crouch already counts as up; only starts that are really
+	// down count as floor starts for the get-up statistics.
+	e.StartedLying = !e.up
 	e.prevPot = e.potential()
 	e.Assisted = !e.StartedLying && e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
 	if e.Assisted {

@@ -86,6 +86,14 @@ func (t *Trainer) SetAssist(a float64) {
 	}
 }
 
+// SetStartLevel changes how far down floor starts go for episodes that
+// start from now on. Call it between iterations.
+func (t *Trainer) SetStartLevel(l float64) {
+	for _, e := range t.envs {
+		e.Cfg.StartLevel = l
+	}
+}
+
 func New(cfg Config, pol *policy.SetPolicy, val *policy.SetValue, envs []*env.Env, seed int64) *Trainer {
 	t := &Trainer{Cfg: cfg, Pol: pol, Val: val, envs: envs, epRet: make([]float64, len(envs)),
 		popt: policy.NewAdam(pol.Params(), cfg.LR), vopt: policy.NewAdam(val.Params(), cfg.VLR)}

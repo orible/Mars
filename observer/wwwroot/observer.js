@@ -53,8 +53,23 @@ function report(state) {
     f ? f.bodyRev : 0,
     f ? f.cylinders.length : 0,
     f ? f.mass : 0,
-    f ? f.t : 0
+    f ? f.t : 0,
+    f && f.scenario ? f.scenario : "",
+    f && f.startLevel ? f.startLevel : 0,
+    !!(f && f.follow),
+    f && f.training ? trainingSummary(f.training) : ""
   );
+}
+
+// One line on the training run the sim server can see.
+function trainingSummary(s) {
+  const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : "–");
+  const parts = [`training "${s.scenario}" iteration ${s.iter} (${s.elapsed})`, `start level ${s.startLevel.toFixed(2)}`];
+  if (s.floorStarts) parts.push(`got up ${s.gotUp}/${s.floorStarts} (${pct(s.gotUp, s.floorStarts)})`);
+  if (s.soloEpisodes) parts.push(`unheld falls ${s.soloFalls}/${s.soloEpisodes}`);
+  if (s.assist > 0) parts.push(`harness ${s.assist.toFixed(2)}`);
+  parts.push(`return ${s.meanReturn.toFixed(1)}`);
+  return parts.join(" · ");
 }
 
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
