@@ -187,9 +187,11 @@ func Random(rng *rand.Rand) Body {
 		Supply: hydraulics.Supply{Pressure: u(2.5e6, 4e6), BulkModulus: u(1e8, 4e8)},
 		Links: []Link{{
 			Name: "pelvis", Mass: u(1.5, 6),
-			Com:      geom.V3{u(-0.05, 0.05), u(0, 0.12), u(-0.03, 0.03)},
-			Inertia:  geom.V3{0.01, 0.01, 0.01},
-			Contacts: []geom.V3{{0.08, 0, -hw - 0.02}, {0.08, 0, hw + 0.02}, {-0.08, 0, -hw - 0.02}, {-0.08, 0, hw + 0.02}},
+			Com:     geom.V3{u(-0.05, 0.05), u(0, 0.12), u(-0.03, 0.03)},
+			Inertia: geom.V3{0.01, 0.01, 0.01},
+			// Bottom and top corners, so it can lie on its back, front or side.
+			Contacts: []geom.V3{{0.08, 0, -hw - 0.02}, {0.08, 0, hw + 0.02}, {-0.08, 0, -hw - 0.02}, {-0.08, 0, hw + 0.02},
+				{0.08, 0.12, -hw - 0.02}, {0.08, 0.12, hw + 0.02}, {-0.08, 0.12, -hw - 0.02}, {-0.08, 0.12, hw + 0.02}},
 		}},
 	}
 	link := func(name, parent string, origin, axis geom.V3, lo, hi, mass float64, com, inertia geom.V3) {
@@ -221,16 +223,19 @@ func Random(rng *rand.Rand) Body {
 		// −20°..90° (human 120°), knee 90° flexion (human 135°; a straight
 		// quad cylinder loses its lever beyond that without a kneecap
 		// pulley) to a 3° hyperextension lock, ankle 45° plantar to 20°
-		// dorsi. On the left
-		// leg (z < 0) positive roll is abduction; the right is mirrored.
+		// dorsi. On the left leg (z < 0) positive roll is abduction; the
+		// right is mirrored.
 		rollLo, rollHi := -0.52, 0.79
 		if z > 0 {
 			rollLo, rollHi = -0.79, 0.52
 		}
 		link("hip_roll_"+s, "pelvis", geom.V3{0, -drop, z * hw}, geom.V3{1, 0, 0}, rollLo, rollHi, 0.05, geom.V3{}, geom.V3{1e-5, 1e-5, 1e-5})
 		link("thigh_"+s, "hip_roll_"+s, geom.V3{}, geom.V3{0, 0, 1}, -0.35, 1.57, thM, geom.V3{0, -th / 2, 0}, rodInertia(thM, th))
+		// Front, back and outer side of the limb, so it rests on the floor
+		// when lying down instead of sinking through.
+		b.Links[len(b.Links)-1].Contacts = []geom.V3{{0.04, -th / 2, 0}, {-0.04, -th / 2, 0}, {0, -th / 2, z * 0.04}}
 		link("shin_"+s, "thigh_"+s, geom.V3{0, -th, 0}, geom.V3{0, 0, 1}, -1.57, 0.05, shM, geom.V3{0, -sh / 2, 0}, rodInertia(shM, sh))
-		b.Links[len(b.Links)-1].Contacts = []geom.V3{{0.03, 0, 0}} // kneecap
+		b.Links[len(b.Links)-1].Contacts = []geom.V3{{0.03, 0, 0}, {0.03, -sh / 2, 0}, {-0.04, -sh / 2, 0}, {0, -sh / 2, z * 0.035}} // kneecap, shin
 		link("foot_"+s, "shin_"+s, geom.V3{0, -sh, 0}, geom.V3{0, 0, 1}, -0.79, 0.35, ftM, geom.V3{0.03, -0.03, 0}, geom.V3{2e-4, 4e-4, 3e-4})
 		sole, heel, toe, half := -u(0.04, 0.06), -u(0.04, 0.06), u(0.09, 0.14), u(0.025, 0.045)
 		b.Links[len(b.Links)-1].Contacts = []geom.V3{{heel, sole, -half}, {heel, sole, half}, {toe, sole, -half}, {toe, sole, half}}

@@ -168,6 +168,44 @@ func TestHarnessCarriesUpright(t *testing.T) {
 	}
 }
 
+// Placed lying on its back, front or side, the robot should settle on the
+// floor without sinking through it or blowing up.
+func TestLyingSettles(t *testing.T) {
+	m := loadBiped(t)
+	z := geom.V3{0, 0, 1}
+	for name, r := range map[string]geom.M3{
+		"back":  geom.AxisAngle(z, math.Pi/2),
+		"front": geom.AxisAngle(z, -math.Pi/2),
+		"side":  geom.AxisAngle(geom.V3{1, 0, 0}, math.Pi/2),
+	} {
+		w := NewWorld(m, true)
+		q := make([]float64, m.NDof())
+		w.Place(r, q, 0, 0)
+		for s := 0; s < 20000; s++ { // 1 s
+			w.Step(50e-6)
+			if !w.Healthy() {
+				t.Fatalf("%s: non-finite at %.3f s", name, w.T)
+			}
+		}
+		lowest := math.Inf(1)
+		for i := range m.Names {
+			lowest = math.Min(lowest, w.Pose.P[i][1])
+		}
+		load := 0.0
+		for _, f := range w.ContactF {
+			load += f[1]
+		}
+		_, mass := w.CoG()
+		t.Logf("%s: pelvis %.3f m high, lowest joint %.3f m, floor carries %.1f of %.1f N, upright=%v", name, w.Base.P[1], lowest, load, mass*9.81, w.Upright())
+		if lowest < -0.01 {
+			t.Errorf("%s: a joint sank %.3f m into the floor", name, -lowest)
+		}
+		if math.Abs(load-mass*9.81) > 0.1*mass*9.81 || w.Upright() {
+			t.Errorf("%s: should be lying at rest on the floor", name)
+		}
+	}
+}
+
 // Knee lock: with the knees pushed into their hyperextension stops, the
 // stops (not the cylinders) carry the knee load.
 func TestKneesLockAtExtensionStop(t *testing.T) {

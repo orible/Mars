@@ -25,6 +25,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -155,6 +156,8 @@ type sim struct {
 	policies <-chan *policy.SetPolicy
 	push     float64 // mean seconds between random pushes, 0 = none
 	rng      *rand.Rand
+	scen     env.Scenario
+	up       bool // upright (or stumbling, not yet fallen)
 }
 
 func (s *sim) reset(b body.Body) error {
@@ -166,8 +169,7 @@ func (s *sim) reset(b body.Body) error {
 		return fmt.Errorf("body %q has no contact points, so it cannot stand on the floor; add \"contacts\" to its feet or run with -stand", b.Name)
 	}
 	s.world = model.NewWorld(m, s.floating)
-	s.fallenAt = -1
-	s.newWorld(geom.V3{})
+	s.restart()
 	s.rev++
 	limited := 0
 	s.reach = m.Reach(200)
@@ -194,9 +196,9 @@ func (s *sim) control() {
 		copy(w.Cmd, s.pol.Act(tokens, global))
 	}
 	s.tick++
-	if s.push > 0 && w.Floating && s.rng.Float64() < controlDt/s.push {
+	if s.push > 0 && w.Floating && s.up && s.rng.Float64() < controlDt/s.push {
 		// Same pushes as training: a sudden sideways velocity change.
-		lo, hi := env.DefaultStand().PushSpeed[0], env.DefaultStand().PushSpeed[1]
+		lo, hi := s.scen.PushSpeed[0], s.scen.PushSpeed[1]
 		a, v := s.rng.Float64()*2*math.Pi, lo+s.rng.Float64()*(hi-lo)
 		w.Base.V = w.Base.V.Add(geom.V3{v * math.Cos(a), 0, v * math.Sin(a)})
 	}
@@ -207,22 +209,35 @@ func (s *sim) control() {
 	case !w.Healthy():
 		log.Printf("simulation diverged at t=%.3f s; resetting pose", w.T)
 		s.restart()
-	case w.Fallen() && s.fallenAt < 0:
-		s.fallenAt = w.T
+		return
+	case s.up && w.Fallen():
+		s.up, s.fallenAt = false, w.T
 		s.falls++
-	case s.fallenAt >= 0 && w.T-s.fallenAt > 1:
+		w.Harness.Strength = 0 // let go; it has to get itself up
+	case !s.up && w.Upright():
+		s.up, s.fallenAt = true, -1
+	}
+	// Scenarios that end on a fall reset 1 s later; the others leave the
+	// robot to get itself up, and only reset if it is still down after 15 s.
+	if s.fallenAt >= 0 && (s.scen.EndOnFall && w.T-s.fallenAt > 1 || w.T-s.fallenAt > 15) {
 		s.restart()
 	}
 }
 
-// restart puts the same body back in the neutral pose at the origin,
-// keeping sim time, and restarts the world's objectives.
+// restart puts the same body back at the origin, standing or (as often as
+// the scenario says) lying on the floor, keeping sim time, and restarts
+// the world's objectives.
 func (s *sim) restart() {
 	t := s.world.T
 	s.world = model.NewWorld(s.world.M, s.floating)
 	s.world.T = t
 	s.fallenAt = -1
+	s.up = true
 	s.newWorld(geom.V3{})
+	if s.floating && s.rng.Float64() < s.scen.LyingFrac {
+		env.LieDown(s.world, s.rng)
+		s.up, s.fallenAt = false, t
+	}
 }
 
 // newWorld starts the objectives again: the -world file, or a fresh random
@@ -250,10 +265,10 @@ func (s *sim) newWorld(from geom.V3) {
 // command runs one turn of the perception → LLM → command loop.
 func (s *sim) command() {
 	w := s.world
-	p := s.tracker.Perceive(w.T, w.Base.P, w.Base.R, s.fallenAt >= 0)
+	p := s.tracker.Perceive(w.T, w.Base.P, w.Base.R, !s.up)
 	if p.Objectives == 0 && s.worldCfg == nil {
 		s.newWorld(w.Base.P) // random worlds go on forever
-		p = s.tracker.Perceive(w.T, w.Base.P, w.Base.R, s.fallenAt >= 0)
+		p = s.tracker.Perceive(w.T, w.Base.P, w.Base.R, !s.up)
 	}
 	s.llm.mu.Lock()
 	s.llm.perception, s.llm.prompt = p, p.Prompt()
@@ -264,8 +279,11 @@ func (s *sim) command() {
 		if posted != nil {
 			s.cmd = *posted
 		}
-	} else {
+	} else if s.scen.Walk && s.up {
 		s.cmd = s.loop.Update(w.T, p)
+	} else {
+		s.cmd = command.Stop // stand still, or wait while it gets up
+		s.loop.Reset(w.T)
 	}
 	if w.Harness.Strength > 0 {
 		yaw := math.Atan2(-w.Base.R[2][0], w.Base.R[0][0])
@@ -427,7 +445,8 @@ func main() {
 	checkOnly := flag.Bool("check", false, "print the cylinder reach report for -body and exit")
 	stand := flag.Bool("stand", false, "test stand: bolt the pelvis to the world instead of standing on the floor")
 	hold := flag.Bool("hold", false, "close every valve (cylinders lock the joints) instead of running the policy")
-	push := flag.Float64("push", 0, "if > 0, push the robot sideways (0.1–0.4 m/s) on average every this many seconds, as in training")
+	push := flag.Float64("push", -1, "push the robot sideways on average every this many seconds (0 = never; default: the scenario's)")
+	scenarioArg := flag.String("scenario", "life", "scenario to watch ("+strings.Join(env.ScenarioNames(), ", ")+", or a .json file): whether it walks, starts on the floor, and is reset or left to get up after a fall")
 	speed := flag.Float64("speed", 1, "simulated seconds per wall-clock second; 0 = as fast as one core allows (the trainer always runs flat out on every core)")
 	assist := flag.Float64("assist", 0, "harness strength 0–1: hold the pelvis up and carry it along the command, as in early training")
 	worldPath := flag.String("world", "", "world file (objectives, friction); random worlds if empty")
@@ -445,6 +464,14 @@ func main() {
 		worldCfg = &wl
 	}
 	link := &llmLink{}
+	scen, err := env.LoadScenario(*scenarioArg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *push < 0 {
+		*push = scen.PushEvery
+	}
+	log.Printf("scenario %q: %s", scen.Name, scen.Description)
 
 	if *checkOnly {
 		check(*bodyPath)
@@ -478,7 +505,7 @@ func main() {
 
 	var latest atomic.Pointer[[]byte]
 	go func() {
-		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng,
+		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng, scen: scen,
 			worldCfg: worldCfg, external: *commander == "external", llm: link, assist: *assist,
 			loop: command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, rng)}
 		for s.world == nil {

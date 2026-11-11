@@ -167,6 +167,18 @@ Most world-model basics are learned in simulation; real hardware only receives p
   4. Memory.
   5. An obstacle curriculum.
 
+**Learning to kick by getting up off the floor.** Babies learn to kick and push hard by lying on the floor and struggling to roll, sit and get up, long before they walk. Training does the same:
+
+- **Floor starts.** Episodes can start lying on the back, front or a side, with the legs at random angles. Contact points on the thighs, shins and pelvis corners let the body rest on the floor.
+- **A fall is not the end.** Being down pays little. Getting higher and more upright pays as it happens (potential-based shaping, so it cannot be farmed). Being up pays far more and switches to the command-following reward.
+- **Getting up is part of the same skill.** While the robot is down, the LLM loop is told it has fallen and its command is to stand still.
+- **Scenarios** (`-scenario` on the trainer and the sim server) choose the mix:
+  - `getup`: always start on the floor.
+  - `stand`: stand through pushes.
+  - `walk`: walk where told.
+  - `life`: everything at once.
+  - Scenario files in `sim/scenarios/` combine these. All of them train the same network.
+
 **Learning to step like a baby: held, carried and kicking.** Babies first learn to step by being held under the arms and carried forward while they kick. Training does the same:
 
 - **The harness** (`model.Harness`) takes up to half the weight, keeps the pelvis upright, and carries it along at the commanded velocity.

@@ -133,6 +133,37 @@ func NewWorld(m *Model, floating bool) *World {
 	return w
 }
 
+// Place puts a floating robot at rest with pelvis orientation r and joint
+// angles q (clamped to their limits), lowered until its lowest contact
+// point or joint is just above the floor, at horizontal position xz. Use
+// it to start lying on the back, front or side.
+func (w *World) Place(r geom.M3, q []float64, x, z float64) {
+	m := w.M
+	for i := range w.Q {
+		w.Q[i] = math.Max(m.Lo[i+1], math.Min(m.Hi[i+1], q[i]))
+		w.Qd[i] = 0
+	}
+	w.Base = Base{R: r}
+	w.refresh()
+	lo := math.Inf(1)
+	for _, c := range m.Contacts {
+		lo = math.Min(lo, m.Point(w.Pose, c.Link, c.Point)[1])
+	}
+	for i := range m.Names {
+		lo = math.Min(lo, w.Pose.P[i][1])
+	}
+	w.Base.P = geom.V3{x, 0.005 - lo, z}
+	w.refresh()
+	for k, c := range m.Cyl {
+		w.Cyl[k] = hydraulics.NewState(c.P, m.Supply)
+		w.Cyl[k].X = w.Len[k] - c.Retracted
+	}
+	for i := range w.touch {
+		w.touch[i], w.ContactF[i] = false, geom.V3{}
+	}
+	w.Harness = Harness{}
+}
+
 // StandHeight is the pelvis height at which the lowest contact point
 // touches the ground in the neutral pose (1 m if there are no contacts).
 func (w *World) StandHeight() float64 {
@@ -341,6 +372,15 @@ func (w *World) Up() geom.V3 { return geom.V3{w.Base.R[0][1], w.Base.R[1][1], w.
 func (w *World) Fallen() bool {
 	return w.Floating && (w.Up()[1] < 0.5 || w.Base.P[1] < 0.5*w.standH)
 }
+
+// Upright reports a robot that is standing: pelvis within 30° of
+// vertical and at least 70% of standing height.
+func (w *World) Upright() bool {
+	return !w.Floating || (w.Up()[1] > 0.85 && w.Base.P[1] > 0.7*w.standH)
+}
+
+// StandH is the neutral standing pelvis height.
+func (w *World) StandH() float64 { return w.standH }
 
 // CoG returns the whole-body centre of gravity (world) and total mass.
 func (w *World) CoG() (geom.V3, float64) { return w.M.CoG(w.Pose) }

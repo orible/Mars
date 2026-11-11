@@ -64,17 +64,31 @@ cd sim && go run ./cmd/simserver -stand
 
 ## Train
 
-Train walking: the movement network follows commands from a scripted stand-in for the LLM loop, which heads for random objectives. Training uses the biped spec plus random bodies, random floor friction and random pushes. Statistics go to `runs/walk.csv`, and the checkpoint is rewritten after every iteration:
+Training runs in scenarios. Each one practises something different, and all of them train the same network (`checkpoints/policy.json`), so skills carry over from one to the next:
+
+| Scenario | What it practises |
+|---|---|
+| `getup` | start lying on the back, front or a side; get up and stay up (the kicking and pushing a baby learns on the floor) |
+| `stand` | stand still through random pushes |
+| `walk` | walk where the LLM stand-in says, held by a fading harness at first |
+| `life` | all of it: start on the floor or standing, get up, walk, get pushed, fall and get back up |
+| `scenarios/*.json` | your own: name a built-in in `"base"` and override fields |
 
 ```bash
-cd sim && go run ./cmd/train -task walk -out checkpoints/walk.json -log runs/walk.csv
+cd sim && go run ./cmd/train -scenario getup -iters 400
 ```
-
-Watch the latest weights in a hand-made world while training runs. The server reloads the checkpoint whenever it changes:
 
 ```bash
-cd sim && go run ./cmd/simserver -policy checkpoints/walk.json -world worlds/flat.json
+cd sim && go run ./cmd/train -scenario life -resume
 ```
+
+Statistics go to `runs/<scenario>.csv`, and the checkpoint is rewritten after every iteration. Watch the latest weights while training runs; the server reloads the checkpoint whenever it changes:
+
+```bash
+cd sim && go run ./cmd/simserver -policy checkpoints/policy.json -scenario getup
+```
+
+Add `-world worlds/flat.json` to walk a hand-made route instead of random objectives.
 
 Let an LLM drive the robot instead of the scripted stand-in. Read `GET http://localhost:8080/perception` for the prompt, and post its reply, such as `{"heading_deg": -20, "speed": 0.3}`, to `POST /command`:
 
@@ -82,7 +96,7 @@ Let an LLM drive the robot instead of the scripted stand-in. Read `GET http://lo
 cd sim && go run ./cmd/simserver -policy checkpoints/walk.json -commander external
 ```
 
-Walking starts out held: a harness carries the pelvis along the command while the legs learn to kick and step, and it fades as the robot stops falling. Episodes without the harness are logged separately as "solo". `-task stand` trains standing only. `simserver -assist 1` shows the held stage.
+In `walk` and `life`, standing starts may be held by a harness that carries the pelvis along the command while the legs kick and step; it fades as the robot stops falling. Unheld standing starts are logged as "solo", and floor starts as "got up n/m". `simserver -assist 1` shows the held stage.
 
 Continue a run with `-resume`. The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
 

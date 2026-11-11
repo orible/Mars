@@ -52,7 +52,10 @@ type Stats struct {
 	Samples              int
 	Episodes, Falls      int
 	MeanReturn, MeanSecs float64 // over episodes that ended this iteration
-	// Episodes without the harness: the robot's real ability.
+	// Episodes that started on the floor, and how many got up.
+	LyingEpisodes, GotUp int
+	// Episodes that started standing without the harness: the robot's
+	// real ability.
 	SoloEpisodes, SoloFalls int
 	SoloSecs                float64
 	AssistedFalls           int
@@ -104,8 +107,10 @@ func logProb(act, mu []float64, logStd float64) float64 {
 
 type episode struct {
 	ret, secs float64
-	fell      bool
+	fell      bool // fell at least once
 	assisted  bool
+	lying     bool // started on the floor
+	gotUp     bool // got up at least once
 }
 
 // rollout runs env i for Steps policy steps and returns its samples with
@@ -125,20 +130,21 @@ func (t *Trainer) rollout(i int) ([]sample, []episode) {
 			act[k] = mu[k] + std*rng.NormFloat64()
 		}
 		sm := sample{tokens: tok, global: g, act: act, logp: logProb(act, mu, t.Pol.LogStd[0]), value: t.Val.Forward(tok, g).V}
-		r, fell, trunc := e.Step(act)
+		r, terminal, trunc := e.Step(act)
 		t.epRet[i] += r
-		if trunc {
+		if trunc && !terminal {
 			nt, ng := e.Observe()
 			r += cfg.Gamma * t.Val.Forward(nt, ng).V
 		}
-		if fell || trunc {
-			eps = append(eps, episode{ret: t.epRet[i], secs: e.Seconds(), fell: fell, assisted: e.Assisted})
+		if terminal || trunc {
+			eps = append(eps, episode{ret: t.epRet[i], secs: e.Seconds(), fell: e.Falls > 0, assisted: e.Assisted,
+				lying: e.StartedLying, gotUp: e.GetUps > 0})
 			t.epRet[i] = 0
 			e.Reset()
 		}
 		out = append(out, sm)
 		rew = append(rew, r)
-		done = append(done, fell || trunc)
+		done = append(done, terminal || trunc)
 	}
 	tok, g := e.Observe()
 	next := t.Val.Forward(tok, g).V
@@ -182,7 +188,12 @@ func (t *Trainer) Iterate() Stats {
 			if ep.fell {
 				st.Falls++
 			}
-			if !ep.assisted {
+			if ep.lying {
+				st.LyingEpisodes++
+				if ep.gotUp {
+					st.GotUp++
+				}
+			} else if !ep.assisted {
 				st.SoloEpisodes++
 				st.SoloSecs += ep.secs
 				if ep.fell {

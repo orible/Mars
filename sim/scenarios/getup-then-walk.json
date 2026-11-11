@@ -1,0 +1,8 @@
+{
+  "base": "life",
+  "name": "getup-then-walk",
+  "description": "every episode starts on the floor; once up, walk where the LLM stand-in says",
+  "lyingFrac": 1,
+  "assist": 0,
+  "episodeSeconds": 20
+}

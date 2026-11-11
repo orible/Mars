@@ -16,7 +16,7 @@
     {
       "name": "simserver-trained",
       "runtimeExecutable": "C:\\Program Files\\Go\\bin\\go.exe",
-      "runtimeArgs": ["-C", "sim", "run", "./cmd/simserver", "-policy", "checkpoints/walk.json", "-world", "worlds/flat.json"],
+      "runtimeArgs": ["-C", "sim", "run", "./cmd/simserver", "-policy", "checkpoints/policy.json", "-scenario", "getup"],
       "port": 8080
     }
   ]

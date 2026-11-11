@@ -67,11 +67,11 @@ func Load(path string) (World, error) {
 
 // RandomConfig shapes generated worlds.
 type RandomConfig struct {
-	Count    int        // objectives per world
-	Distance [2]float64 // m between consecutive objectives
-	MaxTurn  float64    // rad, largest change of direction between legs (π = anywhere)
-	Friction [2]float64
-	Arrive   float64
+	Count    int        `json:"count"`    // objectives per world
+	Distance [2]float64 `json:"distance"` // m between consecutive objectives
+	MaxTurn  float64    `json:"maxTurn"`  // rad, largest change of direction between legs (π = anywhere)
+	Friction [2]float64 `json:"friction"`
+	Arrive   float64    `json:"arrive"`
 }
 
 // DefaultRandom starts easy: short legs, mostly ahead.

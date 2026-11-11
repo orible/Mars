@@ -1,13 +1,16 @@
-// Command train runs PPO for the movement network across the biped spec
-// and random bodies (cylinder count, anchors, CoG), random floor friction
-// and random pushes. Tasks: stand (the stop command) and walk (follow the
-// commands a scripted stand-in for the LLM loop issues while heading for
-// random objectives). It writes the policy checkpoint after every
-// iteration (atomic rename), so a sim server started with -policy on the
-// same file shows the latest weights while training runs.
+// Command train runs PPO for the movement network in a training scenario
+// (-scenario): a built-in (getup, stand, walk, life) or a JSON file. Every
+// scenario trains the same network across the biped spec and random bodies
+// (cylinder count, anchors, CoG), so skills carry from one to the next:
 //
-//	go run ./cmd/train -task walk -out checkpoints/walk.json -log runs/walk.csv
-//	go run ./cmd/simserver -policy checkpoints/walk.json
+//	go run ./cmd/train -scenario getup -iters 400
+//	go run ./cmd/train -scenario walk -resume
+//	go run ./cmd/train -scenario life -resume
+//	go run ./cmd/train -scenario scenarios/getup-then-walk.json -resume
+//
+// It writes the policy checkpoint after every iteration (atomic rename),
+// so a sim server started with -policy on the same file shows the latest
+// weights while training runs.
 package main
 
 import (
@@ -19,6 +22,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"mars/sim/body"
@@ -58,13 +62,13 @@ func readJSON(path string, v any) error {
 func main() {
 	cfg := ppo.Defaults()
 	bodyPath := flag.String("body", "bodies/biped.json", "base body spec")
-	task := flag.String("task", "walk", "stand (always the stop command) or walk (follow the scripted LLM stand-in towards random objectives)")
-	out := flag.String("out", "checkpoints/stand.json", "policy checkpoint (value network goes next to it)")
+	scenarioArg := flag.String("scenario", "life", "what to practise: "+strings.Join(env.ScenarioNames(), ", ")+", or a scenario .json file")
+	out := flag.String("out", "checkpoints/policy.json", "policy checkpoint shared by all scenarios (value network goes next to it)")
 	resume := flag.Bool("resume", false, "continue from -out and its value network")
 	iters := flag.Int("iters", 300, "PPO iterations")
 	seed := flag.Int64("seed", 1, "random seed")
-	randomFrac := flag.Float64("random-bodies", 0.5, "fraction of episodes on random bodies")
-	logPath := flag.String("log", "runs/stand.csv", "per-iteration statistics (CSV)")
+	randomFrac := flag.Float64("random-bodies", -1, "fraction of episodes on random bodies (default: the scenario's)")
+	logPath := flag.String("log", "", "per-iteration statistics (CSV); default runs/<scenario>.csv")
 	flag.IntVar(&cfg.Envs, "envs", cfg.Envs, "parallel environments")
 	flag.IntVar(&cfg.Steps, "steps", cfg.Steps, "policy steps per environment per iteration")
 	flag.Float64Var(&cfg.LR, "lr", cfg.LR, "policy learning rate")
@@ -95,16 +99,17 @@ func main() {
 		log.Fatalf("checkpoint features %d/%d, simulator provides %d/%d", pol.TokenDim, pol.GlobalDim, obs.TokenDim, obs.GlobalDim)
 	}
 
-	var ecfg env.Config
-	switch *task {
-	case "stand":
-		ecfg = env.DefaultStand()
-	case "walk":
-		ecfg = env.DefaultWalk()
-	default:
-		log.Fatalf("-task must be stand or walk, not %q", *task)
+	ecfg, err := env.LoadScenario(*scenarioArg)
+	if err != nil {
+		log.Fatal(err)
 	}
-	ecfg.RandomBodyFrac = *randomFrac
+	if *randomFrac >= 0 {
+		ecfg.RandomBodyFrac = *randomFrac
+	}
+	if *logPath == "" {
+		*logPath = filepath.Join("runs", filepath.Base(strings.TrimSuffix(ecfg.Name, ".json"))+".csv")
+	}
+	log.Printf("scenario %q: %s", ecfg.Name, ecfg.Description)
 	if *assist >= 0 {
 		ecfg.Assist = *assist
 	}
@@ -124,31 +129,31 @@ func main() {
 	}
 	defer csv.Close()
 	if info, _ := csv.Stat(); info.Size() == 0 {
-		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls")
+		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up")
 	}
 
-	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s",
-		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100**randomFrac, *out)
+	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s and %s",
+		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100*ecfg.RandomBodyFrac, *out, *logPath)
 	start := time.Now()
 	var heldEps, heldFalls []int
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
-		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d\n",
+		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d\n",
 			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
-			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls)
+			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp)
 		fallRate := 0.0
 		if s.Episodes > 0 {
 			fallRate = float64(s.Falls) / float64(s.Episodes)
 		}
-		log.Printf("iter %4d  episodes %4d  fell %3.0f%%  ep %.2f s  return %7.2f  assist %.2f  solo %d/%d fell, %.1f s  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
-			s.Iter, s.Episodes, 100*fallRate, s.MeanSecs, s.MeanReturn, level, s.SoloFalls, s.SoloEpisodes, s.SoloSecs, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
+		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
+			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
 			time.Since(start).Round(time.Second))
 
 		// Fade the helping hands as the robot stops falling while held,
 		// and bring them back if it starts falling again. Judged over the
 		// last 20 iterations (≥ 20 held episodes): single iterations end
 		// too few episodes and fade the harness on luck.
-		heldEps = append(heldEps, s.Episodes-s.SoloEpisodes)
+		heldEps = append(heldEps, s.Episodes-s.SoloEpisodes-s.LyingEpisodes)
 		heldFalls = append(heldFalls, s.AssistedFalls)
 		if len(heldEps) > 20 {
 			heldEps, heldFalls = heldEps[1:], heldFalls[1:]
