@@ -98,6 +98,7 @@ type Frame struct {
 	Prompt    string          `json:"prompt"`
 	Command   command.Command `json:"command"`
 	Commander string          `json:"commander"`
+	Hands     geom.V3         `json:"hands"` // harness force on the pelvis, N (zero when not held)
 }
 
 // llmLink is the state shared with the HTTP endpoints an outside LLM
@@ -113,7 +114,8 @@ type sim struct {
 	tracker  *world.Tracker
 	worldCfg *world.World // nil: random worlds
 	loop     *command.Loop
-	external bool // commands come from POST /command instead of the scripted stand-in
+	external bool    // commands come from POST /command instead of the scripted stand-in
+	assist   float64 // harness strength (training's helping hands), 0 = none
 	llm      *llmLink
 	cmd      command.Command
 
@@ -211,6 +213,9 @@ func (s *sim) newWorld(from geom.V3) {
 		}
 	}
 	s.world.Ground.Mu = wl.Friction
+	if s.assist > 0 && s.world.Floating {
+		s.world.Harness = model.Harness{Strength: s.assist, Height: s.world.StandHeight(), Target: s.world.Base.P}
+	}
 	s.tracker = world.NewTracker(wl)
 	s.loop.Reset(s.world.T)
 	s.cmd = command.Stop
@@ -236,6 +241,12 @@ func (s *sim) command() {
 	} else {
 		s.cmd = s.loop.Update(w.T, p)
 	}
+	if w.Harness.Strength > 0 {
+		yaw := math.Atan2(-w.Base.R[2][0], w.Base.R[0][0])
+		a := s.cmd.HeadingDeg * math.Pi / 180
+		fwd, right := geom.V3{math.Cos(yaw), 0, -math.Sin(yaw)}, geom.V3{math.Sin(yaw), 0, math.Cos(yaw)}
+		w.Harness.Vel = fwd.Scale(s.cmd.Speed * math.Cos(a)).Add(right.Scale(s.cmd.Speed * math.Sin(a)))
+	}
 }
 
 func (s *sim) frame() Frame {
@@ -245,7 +256,7 @@ func (s *sim) frame() Frame {
 	imu := obs.ReadIMU(w)
 	f := Frame{T: w.T, BodyName: m.Body.Name, BodyRev: s.rev, Floating: w.Floating, Mass: mass, CoG: cog,
 		Pelvis: w.Base.P, Yaw: math.Atan2(-w.Base.R[2][0], w.Base.R[0][0]), Pitch: imu.Pitch, Roll: imu.Roll, Falls: s.falls, Supply: m.Supply.Pressure,
-		Contacts: []ContactFrame{}, Reached: s.tracker.Reached, Command: s.cmd, Commander: "scripted"}
+		Contacts: []ContactFrame{}, Reached: s.tracker.Reached, Command: s.cmd, Commander: "scripted", Hands: w.Harness.Force}
 	if s.external {
 		f.Commander = "external (POST /command)"
 	}
@@ -382,6 +393,7 @@ func main() {
 	hold := flag.Bool("hold", false, "close every valve (cylinders lock the joints) instead of running the policy")
 	push := flag.Float64("push", 0, "if > 0, push the robot sideways (0.1–0.4 m/s) on average every this many seconds, as in training")
 	speed := flag.Float64("speed", 1, "simulated seconds per wall-clock second; 0 = as fast as one core allows (the trainer always runs flat out on every core)")
+	assist := flag.Float64("assist", 0, "harness strength 0–1: hold the pelvis up and carry it along the command, as in early training")
 	worldPath := flag.String("world", "", "world file (objectives, friction); random worlds if empty")
 	commander := flag.String("commander", "scripted", "who issues walking commands: scripted (the training stand-in for the LLM) or external (an LLM reading GET /perception and posting to /command)")
 	flag.Parse()
@@ -431,7 +443,7 @@ func main() {
 	var latest atomic.Pointer[[]byte]
 	go func() {
 		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng,
-			worldCfg: worldCfg, external: *commander == "external", llm: link,
+			worldCfg: worldCfg, external: *commander == "external", llm: link, assist: *assist,
 			loop: command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, rng)}
 		for s.world == nil {
 			if err := s.reset(<-bodies); err != nil {

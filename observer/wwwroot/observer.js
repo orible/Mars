@@ -135,6 +135,16 @@ function draw(canvas, f) {
     ctx.beginPath(); ctx.arc(gx, gy, 8, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(gx - 12, gy); ctx.lineTo(gx + 12, gy); ctx.moveTo(gx, gy - 12); ctx.lineTo(gx, gy + 12); ctx.stroke();
 
+    // Helping hands (training harness): drawn as an arrow on the pelvis.
+    if (f.hands && Math.hypot(...f.hands) > 0.5) {
+      const p0 = at(pelvis), tip = at([0, 1, 2].map((k) => pelvis[k] + f.hands[k] * newtonsToMetres));
+      ctx.strokeStyle = css("--warn");
+      ctx.lineWidth = 3;
+      ctx.setLineDash([6, 3]);
+      line(ctx, p0, tip);
+      ctx.setLineDash([]);
+    }
+
     // CoG ground projection, and the ground force on each contact point.
     if (floating) {
       ctx.setLineDash([3, 4]);

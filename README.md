@@ -82,7 +82,7 @@ Let an LLM drive the robot instead of the scripted stand-in. Read `GET http://lo
 cd sim && go run ./cmd/simserver -policy checkpoints/walk.json -commander external
 ```
 
-`-task stand` trains standing only.
+Walking starts out held: a harness carries the pelvis along the command while the legs learn to kick and step, and it fades as the robot stops falling. Episodes without the harness are logged separately as "solo". `-task stand` trains standing only. `simserver -assist 1` shows the held stage.
 
 Continue a run with `-resume`. The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
 

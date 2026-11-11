@@ -40,6 +40,13 @@ type Config struct {
 	EpisodeSeconds float64            // time limit
 	PushEvery      float64            // mean seconds between pushes (0 = no pushes)
 	PushSpeed      [2]float64         // m/s, range of the sideways velocity change a push gives
+	// Assist is the harness strength (0–1) for assisted episodes: the
+	// pelvis is held up and carried along at the commanded velocity, as a
+	// baby is held while it kicks. The trainer fades it as falls drop.
+	Assist float64
+	// UnassistedFrac of episodes never get the harness, so real ability
+	// is always being practised and measured.
+	UnassistedFrac float64
 }
 
 // DefaultStand is the standing-balance task.
@@ -52,7 +59,7 @@ func DefaultStand() Config {
 // the scripted LLM stand-in.
 func DefaultWalk() Config {
 	return Config{Walk: true, World: world.DefaultRandom(), RandomBodyFrac: 0.5, EpisodeSeconds: 12,
-		PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3}}
+		PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3}, Assist: 1, UnassistedFrac: 0.2}
 }
 
 // Env is one robot. It is not safe for concurrent use; run one per
@@ -65,10 +72,21 @@ type Env struct {
 	Loop    *command.Loop
 	Cmd     command.Command // command in force
 
+	Assisted bool // this episode has the harness
+
 	rng   *rand.Rand
 	step  int
 	h0    float64 // standing pelvis height
 	prevP geom.V3
+	feet  []foot
+}
+
+// foot is a link that carries the lowest contact points; stepping is
+// rewarded through how long feet stay in the air before touching down.
+type foot struct {
+	contacts []int // indices into model contacts
+	down     bool
+	air      float64 // s since lift-off
 }
 
 func New(base body.Body, cfg Config, seed int64) *Env {
@@ -97,6 +115,70 @@ func (e *Env) Reset() {
 	e.step = 0
 	e.h0 = e.W.StandHeight()
 	e.prevP = e.W.Base.P
+	e.findFeet()
+	e.Assisted = e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
+	if e.Assisted {
+		e.W.Harness = model.Harness{Strength: e.Cfg.Assist, Height: e.h0, Target: e.W.Base.P}
+	}
+}
+
+// findFeet groups contact points by link and keeps the links whose
+// lowest point is within 2 cm of the ground in the neutral pose.
+func (e *Env) findFeet() {
+	m, w := e.W.M, e.W
+	e.feet = e.feet[:0]
+	byLink := map[int]int{}
+	for i, c := range m.Contacts {
+		if m.Point(w.Pose, c.Link, c.Point)[1] > 0.02 {
+			continue
+		}
+		j, ok := byLink[c.Link]
+		if !ok {
+			j = len(e.feet)
+			byLink[c.Link] = j
+			e.feet = append(e.feet, foot{down: true})
+		}
+		e.feet[j].contacts = append(e.feet[j].contacts, i)
+	}
+}
+
+// stepping rewards feet that land after a decent swing while the command
+// says to move: the kicking hint.
+func (e *Env) stepping() float64 {
+	r := 0.0
+	moving := e.Cmd.Speed > 0.05
+	for i := range e.feet {
+		f := &e.feet[i]
+		down := false
+		for _, c := range f.contacts {
+			if e.W.ContactF[c][1] > 0 {
+				down = true
+				break
+			}
+		}
+		if down && !f.down && moving {
+			r += math.Min(f.air, 0.5) - 0.2 // short shuffles cost, swings up to 0.5 s pay
+		}
+		if down {
+			f.air = 0
+		} else {
+			f.air += PolicyDt
+		}
+		f.down = down
+	}
+	return r
+}
+
+// carry points the harness along the command.
+func (e *Env) carry() {
+	h := &e.W.Harness
+	if !e.Assisted {
+		return
+	}
+	yaw := math.Atan2(-e.W.Base.R[2][0], e.W.Base.R[0][0])
+	a := e.Cmd.HeadingDeg * math.Pi / 180
+	fwd, right := geom.V3{math.Cos(yaw), 0, -math.Sin(yaw)}, geom.V3{math.Sin(yaw), 0, math.Cos(yaw)}
+	h.Vel = fwd.Scale(e.Cmd.Speed * math.Cos(a)).Add(right.Scale(e.Cmd.Speed * math.Sin(a)))
 }
 
 // Observe returns the policy inputs for the current state.
@@ -113,6 +195,7 @@ func (e *Env) Step(valves []float64) (r float64, fell, truncated bool) {
 	if e.Cfg.Walk {
 		e.Cmd = e.Loop.Update(w.T, e.Tracker.Perceive(w.T, w.Base.P, w.Base.R, false))
 	}
+	e.carry()
 	for k := range w.Cmd {
 		w.Cmd[k] = math.Max(-1, math.Min(1, valves[k]))
 	}
@@ -160,7 +243,7 @@ func (e *Env) reward(valves []float64) float64 {
 	if e.Cmd.Speed > 0.05 {
 		facing = 0.5 * (1 + math.Cos(h))
 	}
-	return 0.2 + 0.2*upright + 0.5*track + 0.1*facing
+	return 0.2 + 0.2*upright + 0.5*track + 0.1*facing + 0.5*e.stepping()
 }
 
 // Seconds is the time since the episode started.

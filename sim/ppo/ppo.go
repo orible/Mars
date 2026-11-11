@@ -52,11 +52,15 @@ type Stats struct {
 	Samples              int
 	Episodes, Falls      int
 	MeanReturn, MeanSecs float64 // over episodes that ended this iteration
-	Std                  float64
-	KL, ClipFrac         float64
-	ValueLoss            float64
-	Epochs               int
-	RolloutSec, TrainSec float64
+	// Episodes without the harness: the robot's real ability.
+	SoloEpisodes, SoloFalls int
+	SoloSecs                float64
+	AssistedFalls           int
+	Std                     float64
+	KL, ClipFrac            float64
+	ValueLoss               float64
+	Epochs                  int
+	RolloutSec, TrainSec    float64
 }
 
 type Trainer struct {
@@ -69,6 +73,14 @@ type Trainer struct {
 	rngs       []*rand.Rand
 	epRet      []float64
 	popt, vopt *policy.Adam
+}
+
+// SetAssist changes the harness strength for episodes that start from now
+// on. Call it between iterations.
+func (t *Trainer) SetAssist(a float64) {
+	for _, e := range t.envs {
+		e.Cfg.Assist = a
+	}
 }
 
 func New(cfg Config, pol *policy.SetPolicy, val *policy.SetValue, envs []*env.Env, seed int64) *Trainer {
@@ -93,6 +105,7 @@ func logProb(act, mu []float64, logStd float64) float64 {
 type episode struct {
 	ret, secs float64
 	fell      bool
+	assisted  bool
 }
 
 // rollout runs env i for Steps policy steps and returns its samples with
@@ -119,7 +132,7 @@ func (t *Trainer) rollout(i int) ([]sample, []episode) {
 			r += cfg.Gamma * t.Val.Forward(nt, ng).V
 		}
 		if fell || trunc {
-			eps = append(eps, episode{ret: t.epRet[i], secs: e.Seconds(), fell: fell})
+			eps = append(eps, episode{ret: t.epRet[i], secs: e.Seconds(), fell: fell, assisted: e.Assisted})
 			t.epRet[i] = 0
 			e.Reset()
 		}
@@ -169,11 +182,23 @@ func (t *Trainer) Iterate() Stats {
 			if ep.fell {
 				st.Falls++
 			}
+			if !ep.assisted {
+				st.SoloEpisodes++
+				st.SoloSecs += ep.secs
+				if ep.fell {
+					st.SoloFalls++
+				}
+			} else if ep.fell {
+				st.AssistedFalls++
+			}
 		}
 	}
 	if st.Episodes > 0 {
 		st.MeanReturn /= float64(st.Episodes)
 		st.MeanSecs /= float64(st.Episodes)
+	}
+	if st.SoloEpisodes > 0 {
+		st.SoloSecs /= float64(st.SoloEpisodes)
 	}
 	st.Samples = len(batch)
 	st.RolloutSec = time.Since(t0).Seconds()

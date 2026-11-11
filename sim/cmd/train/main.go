@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -67,6 +68,7 @@ func main() {
 	flag.IntVar(&cfg.Envs, "envs", cfg.Envs, "parallel environments")
 	flag.IntVar(&cfg.Steps, "steps", cfg.Steps, "policy steps per environment per iteration")
 	flag.Float64Var(&cfg.LR, "lr", cfg.LR, "policy learning rate")
+	assist := flag.Float64("assist", -1, "starting harness strength 0–1 (walk default 1, stand default 0); faded automatically as assisted falls drop")
 	flag.Parse()
 
 	base, err := body.Load(*bodyPath)
@@ -103,6 +105,10 @@ func main() {
 		log.Fatalf("-task must be stand or walk, not %q", *task)
 	}
 	ecfg.RandomBodyFrac = *randomFrac
+	if *assist >= 0 {
+		ecfg.Assist = *assist
+	}
+	level := ecfg.Assist
 	envs := make([]*env.Env, cfg.Envs)
 	for i := range envs {
 		envs[i] = env.New(base, ecfg, *seed*1000+int64(i))
@@ -118,7 +124,7 @@ func main() {
 	}
 	defer csv.Close()
 	if info, _ := csv.Stat(); info.Size() == 0 {
-		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s")
+		fmt.Fprintln(csv, "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls")
 	}
 
 	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s",
@@ -126,15 +132,29 @@ func main() {
 	start := time.Now()
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
-		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f\n",
-			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec)
+		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d\n",
+			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
+			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls)
 		fallRate := 0.0
 		if s.Episodes > 0 {
 			fallRate = float64(s.Falls) / float64(s.Episodes)
 		}
-		log.Printf("iter %4d  episodes %4d  fell %3.0f%%  ep %.2f s  return %7.2f  σ %.3f  kl %.4f  clip %.2f  vloss %8.2f  ep %d  %.1f+%.1f s  (%s)",
-			s.Iter, s.Episodes, 100*fallRate, s.MeanSecs, s.MeanReturn, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
+		log.Printf("iter %4d  episodes %4d  fell %3.0f%%  ep %.2f s  return %7.2f  assist %.2f  solo %d/%d fell, %.1f s  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
+			s.Iter, s.Episodes, 100*fallRate, s.MeanSecs, s.MeanReturn, level, s.SoloFalls, s.SoloEpisodes, s.SoloSecs, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
 			time.Since(start).Round(time.Second))
+
+		// Fade the helping hands as the robot stops falling while held,
+		// and bring them back if it starts falling again.
+		if assisted := s.Episodes - s.SoloEpisodes; level > 0 && assisted > 0 {
+			rate := float64(s.AssistedFalls) / float64(assisted)
+			switch {
+			case rate < 0.2:
+				level = math.Max(0, level-0.02)
+			case rate > 0.5:
+				level = math.Min(1, level+0.02)
+			}
+			tr.SetAssist(level)
+		}
 		if err := writeJSON(*out, pol); err != nil {
 			log.Fatal(err)
 		}

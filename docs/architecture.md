@@ -155,6 +155,13 @@ Most world-model basics are learned in simulation; real hardware only receives p
   4. Memory.
   5. An obstacle curriculum.
 
+**Learning to step like a baby: held, carried and kicking.** Babies first learn to step by being held under the arms and carried forward while they kick. Training does the same:
+
+- **The harness** (`model.Harness`) takes up to half the weight, keeps the pelvis upright, and carries it along at the commanded velocity.
+- **A stepping reward** (the kicking hint) pays for feet that land after a 0.2–0.5 s swing while the command says to move, and charges for shuffles. The feet are whichever links carry the lowest contact points, so this works for any body.
+- **The trainer fades the harness** when held episodes rarely fall and brings it back when they do. One episode in five is never held, so real ability is always being practised and logged ("solo" in the training log).
+- **Watching:** `simserver -assist 1` shows the held stage.
+
 **Human-like motion.** Use Adversarial Motion Priors (AMP) or DeepMimic-style imitation of human motion-capture clips (CMU, AMASS), retargeted to the robot's leg proportions.
 
 **Domain randomisation.** Randomise fluid properties, valve response, friction, masses, centre of gravity, actuator layout and sensor noise so policies transfer to hardware.

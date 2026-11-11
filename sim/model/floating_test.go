@@ -140,6 +140,27 @@ func TestSledSlidesToFrictionDistance(t *testing.T) {
 	}
 }
 
+// The harness should carry even a rigid (valves closed) biped along
+// upright, its feet dragging.
+func TestHarnessCarriesUpright(t *testing.T) {
+	m := loadBiped(t)
+	w := NewWorld(m, true)
+	w.Harness = Harness{Strength: 1, Vel: geom.V3{0.3, 0, 0}, Height: w.Base.P[1], Target: w.Base.P}
+	for s := 0; s < 40000; s++ { // 2 s
+		w.Step(50e-6)
+		if w.Fallen() || !w.Healthy() {
+			t.Fatalf("fell while held at t=%.2f s", w.T)
+		}
+	}
+	t.Logf("carried to %v, speed %v, up %v, hands %v N", w.Base.P, w.Base.V, w.Up(), w.Harness.Force)
+	if w.Base.P[0] < 0.45 || math.Abs(w.Base.V[0]-0.3) > 0.05 {
+		t.Errorf("pelvis at x=%.2f m moving %.2f m/s; want about 0.6 m at 0.3 m/s", w.Base.P[0], w.Base.V[0])
+	}
+	if w.Up()[1] < 0.98 {
+		t.Errorf("tilted while held: up %v", w.Up())
+	}
+}
+
 // With every valve closed the cylinders lock the joints, so the biped
 // should stand where it was put: weight carried by the feet, no drift.
 func TestBipedStandsWithValvesClosed(t *testing.T) {

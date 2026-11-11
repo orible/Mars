@@ -41,6 +41,18 @@ type Base struct {
 	W geom.V3 // angular velocity, world frame
 }
 
+// Harness holds the pelvis the way an adult holds a baby learning to walk:
+// it carries part of the weight, keeps the pelvis upright and carries it
+// along at a set velocity, so the legs can learn to kick and step before
+// they can balance. Training fades Strength to 0.
+type Harness struct {
+	Strength float64 // 0 = off, 1 = full support
+	Vel      geom.V3 // world velocity to carry the pelvis at (horizontal)
+	Height   float64 // pelvis height to hold
+	Target   geom.V3 // where the harness wants the pelvis now (moves with Vel)
+	Force    geom.V3 // last force applied (for display)
+}
+
 // World is one simulated robot: either on the test stand (pelvis bolted
 // to the world) or floating on the ground with foot contacts. Every
 // cylinder's pressures are coupled to the articulated dynamics.
@@ -49,6 +61,7 @@ type World struct {
 	Floating bool
 	Base     Base
 	Ground   Ground
+	Harness  Harness
 	Q        []float64
 	Qd       []float64
 	Cyl      []hydraulics.State
@@ -213,6 +226,7 @@ func (w *World) Step(dt float64) {
 	w.massAge--
 	if w.Floating {
 		w.contacts()
+		w.harness(dt)
 		copy(w.nu[0:3], w.Base.V[:])
 		copy(w.nu[3:6], w.Base.W[:])
 		copy(w.nu[6:], w.Qd)
@@ -250,6 +264,43 @@ func (w *World) Step(dt float64) {
 	}
 	w.T += dt
 	w.refresh()
+}
+
+// harness applies the helping hands to the pelvis (force at its origin and
+// an uprighting moment).
+func (w *World) harness(dt float64) {
+	h := &w.Harness
+	if h.Strength <= 0 {
+		h.Force = geom.V3{}
+		return
+	}
+	mass := 0.0
+	for _, m := range w.M.Mass {
+		mass += m
+	}
+	p, v := w.Base.P, w.Base.V
+	// The target moves on, but never runs more than 0.3 m ahead.
+	h.Target = h.Target.Add(h.Vel.Scale(dt))
+	for _, i := range []int{0, 2} {
+		h.Target[i] = p[i] + math.Max(-0.3, math.Min(0.3, h.Target[i]-p[i]))
+	}
+	k, c := 100*mass, 20*mass // ≈10 rad/s, critically damped
+	s := h.Strength
+	f := geom.V3{
+		s * (k*(h.Target[0]-p[0]) + c*(h.Vel[0]-v[0])),
+		// Hands hold up to half the weight and can only lift, never push down.
+		math.Max(0, s*(0.5*mass*9.81+k*(h.Height-p[1])-c*v[1])),
+		s * (k*(h.Target[2]-p[2]) + c*(h.Vel[2]-v[2])),
+	}
+	up := w.Up()
+	tilt := up.Cross(geom.V3{0, 1, 0}) // axis that turns the pelvis back upright, length sin(tilt)
+	wh := geom.V3{w.Base.W[0], 0, w.Base.W[2]}
+	tq := tilt.Scale(s * 40 * mass).Sub(wh.Scale(s * 4 * mass))
+	h.Force = f
+	for i := 0; i < 3; i++ {
+		w.gen[i] += f[i]
+		w.gen[3+i] += tq[i]
+	}
 }
 
 // orthonormalize removes rounding drift from a rotation (Gram–Schmidt on
