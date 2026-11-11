@@ -179,7 +179,8 @@ try {
 
 # --- Observer ----------------------------------------------------------------
 Step 'Building the observer (Blazor)'
-if (Get-Process Mars.Observer -ErrorAction SilentlyContinue) {
+$obsDir = Join-Path $root 'observer'
+if (Get-Process Mars.Observer -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($obsDir, [StringComparison]::OrdinalIgnoreCase) }) {
     Warn 'the observer is running, so it was not rebuilt; stop it and run setup again to rebuild'
 } else {
     & dotnet build (Join-Path $root 'observer') --nologo -v q

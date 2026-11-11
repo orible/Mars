@@ -19,14 +19,34 @@ Simulation-first stack for a small hydraulic biped. The full plan is in [docs/ar
 | `sim/worlds` | Hand-made worlds |
 | `sim/env` | Training environment: control timing, randomisation (body, CoG, friction, pushes), command-following reward |
 | `sim/ppo` | PPO with parallel rollouts and parallel gradients |
-| `sim/cmd/train` | Trains the standing task and writes `checkpoints/stand.json` every iteration |
+| `sim/cmd/train` | Trains a scenario and writes `checkpoints/policy.json` every iteration |
+| `sim/cmd/mocapref` | Turns motion capture (CMU ASF/AMC) into human motion references |
+| `training` | Snapshot of the training data (checkpoints and run logs) that git carries between machines |
 | `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec and the policy checkpoint, streams frames on `ws://localhost:8080/ws` |
 | `sim/bodies` | Body specs; edit these as hardware measurements come in |
 | `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG |
 
-## Run
+## Set up
 
-Requires Go 1.22+ and the .NET 10 SDK.
+Requires Go 1.22+ and the .NET 10 SDK. The setup script checks for them, builds everything, and restores the carried training data on a new machine. It's safe to run again.
+
+```powershell
+.\setup.ps1            # Windows; add -Install to install Go/.NET with winget, -Test to run the tests
+```
+
+```bash
+./setup.sh             # macOS/Linux; --install uses Homebrew, --test runs the tests
+```
+
+To carry training to another machine, snapshot it into `training/` and commit:
+
+```powershell
+.\setup.ps1 -Save; git add training; git commit -m "training snapshot"; git push
+```
+
+On the other machine, clone and run setup. It copies the snapshot into `sim/checkpoints` and `sim/runs` when there is no local checkpoint, and `-Restore` (`--restore`) overwrites local data. Then resume with `-resume`. `-Mocap` (`--mocap`) downloads the CMU recordings, which are only needed to re-extract references.
+
+## Run
 
 ```bash
 cd sim && go test ./... && go run ./cmd/simserver
