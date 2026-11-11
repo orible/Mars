@@ -231,11 +231,40 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 	return r, false, float64(e.step)*PolicyDt >= e.Cfg.EpisodeSeconds
 }
 
-// potential measures how far up the robot is: pelvis height (as a fraction
-// of standing height) and how upright the pelvis is, each 0..1.
+// potential measures how far up the robot is, 0..1: almost all pelvis
+// height (as a fraction of standing height), with only a little for the
+// pelvis being upright. Rewarding uprightness strongly taught the robot to
+// straighten its trunk early in a rise, which puts the weight behind the
+// feet and sits it back down; humans keep leaning forward until the legs
+// have done most of the work (the references reward that lean).
 func (e *Env) potential() float64 {
 	h := math.Max(0, math.Min(1, e.W.Base.P[1]/e.h0))
-	return 0.5*h + 0.5*math.Max(0, e.W.Up()[1])
+	return 0.9*h + 0.1*math.Max(0, e.W.Up()[1])
+}
+
+// overFeet is 1 when the centre of gravity is over the middle of the feet
+// that are on the floor, falling off over a few centimetres, and 0 when no
+// foot is on the floor. Rising from a squat or kneeling needs the weight
+// over the feet; letting it drift behind them is how the robot sat back
+// down.
+func (e *Env) overFeet() float64 {
+	w := e.W
+	var cx, cz float64
+	n := 0
+	for _, f := range e.feet {
+		for _, c := range f.contacts {
+			if w.ContactF[c][1] > 0 {
+				p := w.M.Point(w.Pose, w.M.Contacts[c].Link, w.M.Contacts[c].Point)
+				cx, cz, n = cx+p[0], cz+p[2], n+1
+			}
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	cog, _ := w.CoG()
+	dx, dz := cog[0]-cx/float64(n), cog[2]-cz/float64(n)
+	return math.Exp(-(dx*dx + dz*dz) / (0.04 * 0.04))
 }
 
 // track measures the pose against the human reference, if any.
@@ -245,20 +274,20 @@ func (e *Env) track() {
 	}
 }
 
-// downReward: on the floor. Being down pays little; getting higher and
-// more upright pays as it happens (potential-based shaping, so it cannot
-// be farmed by bobbing up and down), and standing pays far more. With a
-// human reference, moving like the human (close to the reference path)
-// and along it (progress towards standing) pays too, still capped below
-// the least that being up pays.
+// downReward: on the floor. Being down pays little; getting higher pays as
+// it happens (potential-based shaping, so it cannot be farmed by bobbing up
+// and down), keeping the weight over the feet pays, and standing pays far
+// more. With a human reference, moving like the human (close to the
+// reference path) and along it (progress towards standing) pays too. The
+// steady part stays below the least that being up pays (0.2).
 func (e *Env) downReward(valves []float64) float64 {
 	pot := e.potential()
 	shaping := 2 * (pot - e.prevPot)
 	e.prevPot = pot
-	r := 0.1*pot + shaping - 0.02*effort(valves)
+	r := 0.08*pot + 0.04*e.overFeet() + shaping - 0.02*effort(valves)
 	if m := e.Motion; m != nil {
 		close := math.Exp(-m.Error * m.Error / 0.09) // ~17° rms error halves it
-		r += 0.08*close + 1.0*close*(m.Progress-e.prevProgress)
+		r += 0.06*close + 1.0*close*(m.Progress-e.prevProgress)
 		e.prevProgress = m.Progress
 	}
 	return r
