@@ -186,7 +186,7 @@ func TestWorldStaysFinite(t *testing.T) {
 	}
 	for q := range w.Q {
 		l := q + 1
-		if w.Q[q] < m.Lo[l]-0.3 || w.Q[q] > m.Hi[l]+0.3 {
+		if w.Q[q] < m.Lo[l]-0.05 || w.Q[q] > m.Hi[l]+0.05 {
 			t.Errorf("joint %s at %.2f rad, far outside limits [%.2f, %.2f]", m.Names[l], w.Q[q], m.Lo[l], m.Hi[l])
 		}
 	}

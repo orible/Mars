@@ -13,8 +13,12 @@ var Gravity = geom.V3{0, -9.81, 0}
 const (
 	endStopK = 2e5 // N/m, cylinder end stop stiffness
 	endStopC = 500 // N·s/m
-	limitK   = 100 // N·m/rad, joint limit stiffness
-	limitC   = 1   // N·m·s/rad
+	// Joint limits are stiff mechanical stops, so a knee at its extension
+	// stop (a few degrees past straight, as in a human knee) locks: the
+	// weight line falls in front of the joint and pushes it into the stop,
+	// and standing needs no cylinder force at the knee.
+	limitK = 2000 // N·m/rad
+	limitC = 10   // N·m·s/rad
 )
 
 // Ground is a flat floor at y = 0. Each contact point is a compliant

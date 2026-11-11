@@ -37,6 +37,18 @@ The sim is 3D from the start, because much of what makes the pelvis matter is 3D
 - **Cylinders are pinned between two anchors.** Each anchor is a point on a link. Which joints a cylinder spans follows from the tree (a pelvis-to-thigh cylinder spans both hip joints; a pelvis-to-shin cylinder would span hip and knee). Its moment arm about every spanned joint is computed from the current pose each step, and its force acts along the line between the pins. Strength comes from the bore and rod areas times its pressure limit (supply or its own relief setting).
 - **Pelvis configuration is data.** Hip spacing, hip drop and every anchor point on the pelvis plate live in the spec file.
 - **Geometry validation.** A spec is rejected if any cylinder cannot be assembled in the neutral pose. The reach report (`simserver -check`) lists, for each cylinder and each joint it spans, how much of the joint's range the stroke actually allows. Use it to adjust anchor points before printing parts.
+- **Joint ranges follow a human range-of-motion chart** where one linear cylinder can reach, checked with the anchor search and `-check`:
+
+  | Joint | Biped | Human chart | Walking uses |
+  |---|---|---|---|
+  | Hip roll | 30° adduction .. 45° abduction | same | small |
+  | Hip pitch | −20° .. 90° | −20° .. 120° | about −10° .. 30° |
+  | Knee | 3° hyperextension lock .. 90° flexion | 0 .. 135° | about 0 .. 60° |
+  | Ankle | 45° plantar .. 20° dorsi | same | about 20° plantar .. 10° dorsi |
+
+  - **Muscle placement is anatomical.** The knee cylinder is a "quad" down the front of the thigh to the front of the shin. The ankle cylinder is a "calf" down the back of the shin to the heel.
+  - **Knee depth limit.** A straight quad loses its lever beyond about 90° of knee flexion. Humans keep it with the kneecap, which works as a pulley; a kneecap-style linkage would be the way to reach 110–135°.
+  - **Knees lock.** Joint limits are stiff mechanical stops, and the knee's stop sits 3° past straight. On a straight leg the weight pushes the knee into the stop, so standing needs no knee cylinder force, like the human screw-home lock.
 - **Contact points are data.** Each link can list points that touch the ground: sole corners on the feet, plus kneecaps and pelvis corners so falls land properly.
 - **Floor or test stand.** By default the pelvis floats and the robot stands on a flat floor (recursive Newton–Euler with a free base, 50 µs steps coupled to the hydraulics). `simserver -stand` bolts the pelvis to the world so the legs swing freely.
 

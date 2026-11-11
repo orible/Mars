@@ -166,6 +166,7 @@ function draw(canvas, f) {
   }
 
   if (floating) drawTopDown(ctx, f);
+  drawJoints(ctx, f, 40, 566, W - 80);
 
   ctx.fillStyle = css("--muted-text");
   const deg = (r) => (r * 180 / Math.PI).toFixed(1);
@@ -194,6 +195,37 @@ function draw(canvas, f) {
     bar(ctx, left + 230, y, 150, 6, c.pA / f.supply, css("--press-a"));
     bar(ctx, left + 230, y + 8, 150, 6, c.pB / f.supply, css("--press-b"));
     centred(ctx, left + 400, y, 100, 14, c.cmd);
+  });
+}
+
+// Joint extents: each joint's limits (grey), the range its cylinders can
+// actually drive (blue band, if narrower), zero (tick) and the current
+// angle (marker), in degrees. Two columns.
+function drawJoints(ctx, f, x0, y0, width) {
+  const js = f.joints || [];
+  if (!js.length) return;
+  const deg = (r) => (r * 180) / Math.PI;
+  const colW = width / 2, rowH = 22, barX = 130, barW = colW - barX - 140;
+  const span = [-130, 130]; // shared degree scale so joints compare
+  const sx = (d) => barX + ((d - span[0]) / (span[1] - span[0])) * barW;
+  ctx.fillStyle = css("--muted-text");
+  ctx.fillText("joint extents (deg): grey = joint limits, blue = cylinder reach, marker = now", x0, y0 - 8);
+  js.forEach((j, i) => {
+    const x = x0 + (i % 2) * colW, y = y0 + Math.floor(i / 2) * rowH;
+    ctx.fillStyle = css("--text");
+    ctx.fillText(`${j.name} (${j.kind})`, x, y + 11);
+    ctx.fillStyle = css("--muted");
+    ctx.fillRect(x + sx(deg(j.lo)), y + 2, sx(deg(j.hi)) - sx(deg(j.lo)), 12);
+    ctx.fillStyle = css("--accent");
+    ctx.globalAlpha = 0.45;
+    ctx.fillRect(x + sx(deg(j.reach[0])), y + 2, sx(deg(j.reach[1])) - sx(deg(j.reach[0])), 12);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = css("--muted-text");
+    ctx.fillRect(x + sx(0) - 0.5, y, 1, 16);
+    ctx.fillStyle = css("--warn");
+    ctx.fillRect(x + sx(deg(j.q)) - 2, y - 1, 4, 18);
+    ctx.fillStyle = css("--muted-text");
+    ctx.fillText(`${deg(j.lo).toFixed(0)}..${deg(j.hi).toFixed(0)}  now ${deg(j.q).toFixed(0)}`, x + barX + barW + 6, y + 11);
   });
 }
 

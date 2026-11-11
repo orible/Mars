@@ -130,6 +130,7 @@ func main() {
 	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s",
 		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100**randomFrac, *out)
 	start := time.Now()
+	var heldEps, heldFalls []int
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
 		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d\n",
@@ -144,14 +145,25 @@ func main() {
 			time.Since(start).Round(time.Second))
 
 		// Fade the helping hands as the robot stops falling while held,
-		// and bring them back if it starts falling again.
-		if assisted := s.Episodes - s.SoloEpisodes; level > 0 && assisted > 0 {
-			rate := float64(s.AssistedFalls) / float64(assisted)
+		// and bring them back if it starts falling again. Judged over the
+		// last 20 iterations (≥ 20 held episodes): single iterations end
+		// too few episodes and fade the harness on luck.
+		heldEps = append(heldEps, s.Episodes-s.SoloEpisodes)
+		heldFalls = append(heldFalls, s.AssistedFalls)
+		if len(heldEps) > 20 {
+			heldEps, heldFalls = heldEps[1:], heldFalls[1:]
+		}
+		eps, falls := 0, 0
+		for k := range heldEps {
+			eps, falls = eps+heldEps[k], falls+heldFalls[k]
+		}
+		if level > 0 && len(heldEps) == 20 && eps >= 20 {
+			rate := float64(falls) / float64(eps)
 			switch {
-			case rate < 0.2:
-				level = math.Max(0, level-0.02)
-			case rate > 0.5:
-				level = math.Min(1, level+0.02)
+			case rate < 0.15:
+				level = math.Max(0, level-0.01)
+			case rate > 0.4:
+				level = math.Min(1, level+0.01)
 			}
 			tr.SetAssist(level)
 		}

@@ -2,6 +2,7 @@ package model
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"mars/sim/body"
@@ -146,19 +147,74 @@ func TestHarnessCarriesUpright(t *testing.T) {
 	m := loadBiped(t)
 	w := NewWorld(m, true)
 	w.Harness = Harness{Strength: 1, Vel: geom.V3{0.3, 0, 0}, Height: w.Base.P[1], Target: w.Base.P}
+	var mid geom.V3
 	for s := 0; s < 40000; s++ { // 2 s
 		w.Step(50e-6)
 		if w.Fallen() || !w.Healthy() {
 			t.Fatalf("fell while held at t=%.2f s", w.T)
 		}
+		if s == 20000 {
+			mid = w.Base.P
+		}
 	}
-	t.Logf("carried to %v, speed %v, up %v, hands %v N", w.Base.P, w.Base.V, w.Up(), w.Harness.Force)
-	if w.Base.P[0] < 0.45 || math.Abs(w.Base.V[0]-0.3) > 0.05 {
-		t.Errorf("pelvis at x=%.2f m moving %.2f m/s; want about 0.6 m at 0.3 m/s", w.Base.P[0], w.Base.V[0])
+	// The dragging feet stick and slip, so judge speed over the last second.
+	avg := w.Base.P.Sub(mid)
+	t.Logf("carried to %v, last-second travel %v, up %v, hands %v N", w.Base.P, avg, w.Up(), w.Harness.Force)
+	if w.Base.P[0] < 0.45 || math.Abs(avg[0]-0.3) > 0.05 || math.Abs(avg[2]) > 0.05 {
+		t.Errorf("pelvis at x=%.2f m, last second %.2f m forward, %.2f m sideways; want about 0.3 m/s straight", w.Base.P[0], avg[0], avg[2])
 	}
 	if w.Up()[1] < 0.98 {
 		t.Errorf("tilted while held: up %v", w.Up())
 	}
+}
+
+// Knee lock: with the knees pushed into their hyperextension stops, the
+// stops (not the cylinders) carry the knee load.
+func TestKneesLockAtExtensionStop(t *testing.T) {
+	m := loadBiped(t)
+	w := NewWorld(m, true)
+	knees := []int{}
+	for q := range w.Q {
+		if strings.HasPrefix(m.Names[q+1], "shin") {
+			knees = append(knees, q)
+			w.Q[q] = m.Hi[q+1] // start at the lock
+		}
+	}
+	w.Base.P[1] = w.StandHeight() + 0.002
+	w.refresh()
+	for k := range m.Cyl { // re-seat cylinders on the new pose
+		w.Cyl[k].X = w.Len[k] - m.Cyl[k].Retracted
+	}
+	// Knee cylinders free-wheel (valve wide open both ways is not
+	// modelled), so instead command them to extend the knee hard.
+	for k, c := range m.Cyl {
+		if strings.HasPrefix(c.Name, "knee") {
+			w.Cmd[k] = extendSign(t, w, k)
+		}
+	}
+	for s := 0; s < 20000; s++ {
+		w.Step(50e-6)
+		if w.Fallen() {
+			t.Fatalf("fell at %.2f s", w.T)
+		}
+	}
+	for _, q := range knees {
+		over := (w.Q[q] - m.Hi[q+1]) * 180 / math.Pi
+		t.Logf("%s at %.2f° (stop %.2f°, %.2f° into it)", m.Names[q+1], w.Q[q]*180/math.Pi, m.Hi[q+1]*180/math.Pi, over)
+		if over > 1 || over < -0.5 {
+			t.Errorf("%s not held at its stop: %.2f° past it", m.Names[q+1], over)
+		}
+	}
+}
+
+// extendSign returns the valve command sign that straightens the joint
+// cylinder k spans (its moment arm tells which way extension turns it).
+func extendSign(t *testing.T, w *World, k int) float64 {
+	t.Helper()
+	if w.DLdq[k][0] > 0 {
+		return 1 // lengthening raises q (towards extension)
+	}
+	return -1
 }
 
 // With every valve closed the cylinders lock the joints, so the biped

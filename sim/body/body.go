@@ -196,8 +196,8 @@ func Random(rng *rand.Rand) Body {
 		b.Links = append(b.Links, Link{Name: name, Parent: parent, Mass: mass, Com: com, Inertia: inertia,
 			Joint: &Joint{Origin: origin, Axis: axis, Limits: [2]float64{lo, hi}, Damping: 0.05}})
 	}
-	cyl := func(name string, base, rod Anchor) {
-		bore, stroke := u(1.2e-4, 3.2e-4), u(0.04, 0.09)
+	cyl := func(name string, base, rod Anchor, nominalStroke float64) {
+		bore, stroke := u(1.2e-4, 3.2e-4), nominalStroke*u(0.85, 1.15)
 		l0 := b.ZeroPosition(rod).Sub(b.ZeroPosition(base)).Norm()
 		b.Cylinders = append(b.Cylinders, Cylinder{
 			Name: name, Base: base, Rod: rod, RetractedLength: l0 - stroke*u(0.3, 0.7),
@@ -216,25 +216,40 @@ func Random(rng *rand.Rand) Body {
 	}{{"l", -1}, {"r", 1}} {
 		s, z := side.s, side.z
 		thM, shM, ftM := u(0.5, 1.2), u(0.4, 0.9), u(0.2, 0.5)
-		link("hip_roll_"+s, "pelvis", geom.V3{0, -drop, z * hw}, geom.V3{1, 0, 0}, -0.35, 0.35, 0.05, geom.V3{}, geom.V3{1e-5, 1e-5, 1e-5})
-		link("thigh_"+s, "hip_roll_"+s, geom.V3{}, geom.V3{0, 0, 1}, -0.35, 1.0, thM, geom.V3{0, -th / 2, 0}, rodInertia(thM, th))
-		link("shin_"+s, "thigh_"+s, geom.V3{0, -th, 0}, geom.V3{0, 0, 1}, -1.5, 0, shM, geom.V3{0, -sh / 2, 0}, rodInertia(shM, sh))
+		// Joint ranges follow a human range-of-motion chart where a single
+		// cylinder can reach: hip roll 30° adduction to 45° abduction, hip
+		// −20°..90° (human 120°), knee 90° flexion (human 135°; a straight
+		// quad cylinder loses its lever beyond that without a kneecap
+		// pulley) to a 3° hyperextension lock, ankle 45° plantar to 20°
+		// dorsi. On the left
+		// leg (z < 0) positive roll is abduction; the right is mirrored.
+		rollLo, rollHi := -0.52, 0.79
+		if z > 0 {
+			rollLo, rollHi = -0.79, 0.52
+		}
+		link("hip_roll_"+s, "pelvis", geom.V3{0, -drop, z * hw}, geom.V3{1, 0, 0}, rollLo, rollHi, 0.05, geom.V3{}, geom.V3{1e-5, 1e-5, 1e-5})
+		link("thigh_"+s, "hip_roll_"+s, geom.V3{}, geom.V3{0, 0, 1}, -0.35, 1.57, thM, geom.V3{0, -th / 2, 0}, rodInertia(thM, th))
+		link("shin_"+s, "thigh_"+s, geom.V3{0, -th, 0}, geom.V3{0, 0, 1}, -1.57, 0.05, shM, geom.V3{0, -sh / 2, 0}, rodInertia(shM, sh))
 		b.Links[len(b.Links)-1].Contacts = []geom.V3{{0.03, 0, 0}} // kneecap
-		link("foot_"+s, "shin_"+s, geom.V3{0, -sh, 0}, geom.V3{0, 0, 1}, -0.5, 0.4, ftM, geom.V3{0.03, -0.03, 0}, geom.V3{2e-4, 4e-4, 3e-4})
+		link("foot_"+s, "shin_"+s, geom.V3{0, -sh, 0}, geom.V3{0, 0, 1}, -0.79, 0.35, ftM, geom.V3{0.03, -0.03, 0}, geom.V3{2e-4, 4e-4, 3e-4})
 		sole, heel, toe, half := -u(0.04, 0.06), -u(0.04, 0.06), u(0.09, 0.14), u(0.025, 0.045)
 		b.Links[len(b.Links)-1].Contacts = []geom.V3{{heel, sole, -half}, {heel, sole, half}, {toe, sole, -half}, {toe, sole, half}}
 
-		// Template: the anchor layout found for biped.json (walking range
-		// with the most leverage), scaled to segment length and jittered.
-		cyl("hip_pitch_"+s, Anchor{"pelvis", jit(geom.V3{0.06, 0.005 - drop, z * hw})}, Anchor{"thigh_" + s, jit(geom.V3{0, -0.8 * th, 0})})
+		// Template: the anchor layout found for biped.json (the
+		// human-aligned ranges with the most leverage), scaled to segment
+		// length and jittered, so random bodies are only sometimes short of
+		// full range.
+		cyl("hip_pitch_"+s, Anchor{"pelvis", jit(geom.V3{0.055, 0.015 - drop, z * hw})}, Anchor{"thigh_" + s, jit(geom.V3{-0.045, -0.88 * th, 0})}, 0.10)
 		if hipRoll {
-			cyl("hip_roll_"+s, Anchor{"pelvis", jit(geom.V3{0, 0.07 - drop, z * (hw - 0.06)})}, Anchor{"thigh_" + s, jit(geom.V3{0, -0.08, z * 0.035})})
+			cyl("hip_roll_"+s, Anchor{"pelvis", jit(geom.V3{0, -0.005 - drop, z * (hw - 0.045)})}, Anchor{"thigh_" + s, jit(geom.V3{0, -0.64 * th, -z * 0.04})}, 0.06)
 		}
-		cyl("knee_"+s, Anchor{"thigh_" + s, jit(geom.V3{0.035, -0.2 * th, 0})}, Anchor{"shin_" + s, jit(geom.V3{-0.05, -0.02, 0})})
-		if doubleKnee {
-			cyl("knee_back_"+s, Anchor{"thigh_" + s, jit(geom.V3{-0.035, -0.2 * th, 0})}, Anchor{"shin_" + s, jit(geom.V3{0.05, -0.02, 0})})
+		// Knee: a "quad" down the front of the thigh to the front of the
+		// shin. Ankle: a "calf" down the back of the shin to the heel.
+		cyl("knee_"+s, Anchor{"thigh_" + s, jit(geom.V3{0.07, -0.38 * th, 0})}, Anchor{"shin_" + s, jit(geom.V3{0.065, -0.005, 0})}, 0.08)
+		if doubleKnee { // a "hamstring" behind, diagonal to the front of the shin
+			cyl("knee_back_"+s, Anchor{"thigh_" + s, jit(geom.V3{-0.03, -0.12 * th, 0})}, Anchor{"shin_" + s, jit(geom.V3{0.045, -0.035, 0})}, 0.10)
 		}
-		cyl("ankle_"+s, Anchor{"shin_" + s, jit(geom.V3{-0.035, -0.2 * sh, 0})}, Anchor{"foot_" + s, jit(geom.V3{-0.05, 0, 0})})
+		cyl("ankle_"+s, Anchor{"shin_" + s, jit(geom.V3{-0.04, -0.34 * sh, 0})}, Anchor{"foot_" + s, jit(geom.V3{-0.05, -0.01, 0})}, 0.06)
 	}
 	b.Name = fmt.Sprintf("random-%d", len(b.Cylinders))
 	return b

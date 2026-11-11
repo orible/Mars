@@ -99,6 +99,30 @@ type Frame struct {
 	Command   command.Command `json:"command"`
 	Commander string          `json:"commander"`
 	Hands     geom.V3         `json:"hands"` // harness force on the pelvis, N (zero when not held)
+	Joints    []JointFrame    `json:"joints"`
+}
+
+// JointFrame is one joint's angle within its limits. Kind names the
+// motion from the joint axis: about X (forward) is roll, about Y (up) is
+// yaw, about Z (right) is pitch.
+type JointFrame struct {
+	Name  string     `json:"name"`
+	Kind  string     `json:"kind"`
+	Q     float64    `json:"q"`
+	Lo    float64    `json:"lo"`
+	Hi    float64    `json:"hi"`
+	Reach [2]float64 `json:"reach"` // the range its cylinders' strokes allow
+}
+
+func axisKind(a geom.V3) string {
+	ax, ay, az := math.Abs(a[0]), math.Abs(a[1]), math.Abs(a[2])
+	switch {
+	case ax >= ay && ax >= az:
+		return "roll"
+	case ay >= az:
+		return "yaw"
+	}
+	return "pitch"
 }
 
 // llmLink is the state shared with the HTTP endpoints an outside LLM
@@ -116,6 +140,7 @@ type sim struct {
 	loop     *command.Loop
 	external bool    // commands come from POST /command instead of the scripted stand-in
 	assist   float64 // harness strength (training's helping hands), 0 = none
+	reach    []model.ReachRow
 	llm      *llmLink
 	cmd      command.Command
 
@@ -145,7 +170,8 @@ func (s *sim) reset(b body.Body) error {
 	s.newWorld(geom.V3{})
 	s.rev++
 	limited := 0
-	for _, r := range m.Reach(200) {
+	s.reach = m.Reach(200)
+	for _, r := range s.reach {
 		if !r.Full() {
 			limited++
 		}
@@ -268,6 +294,16 @@ func (s *sim) frame() Frame {
 	s.llm.mu.Unlock()
 	for i, c := range m.Contacts {
 		f.Contacts = append(f.Contacts, ContactFrame{P: m.Point(w.Pose, c.Link, c.Point), F: w.ContactF[i]})
+	}
+	for q := range w.Q {
+		l := q + 1
+		j := JointFrame{Name: m.Names[l], Kind: axisKind(m.Axis[l]), Q: w.Q[q], Lo: m.Lo[l], Hi: m.Hi[l], Reach: [2]float64{m.Lo[l], m.Hi[l]}}
+		for _, r := range s.reach {
+			if r.Joint == j.Name {
+				j.Reach[0], j.Reach[1] = math.Max(j.Reach[0], r.Lo), math.Min(j.Reach[1], r.Hi)
+			}
+		}
+		f.Joints = append(f.Joints, j)
 	}
 	for i, name := range m.Names {
 		f.Links = append(f.Links, LinkFrame{Name: name, Parent: m.Parent[i], Origin: w.Pose.P[i], Com: m.Point(w.Pose, i, m.Com[i])})
