@@ -61,7 +61,7 @@ type Env struct {
 	// Motion is the human reference being tracked while getting up (nil
 	// if the scenario has none or the body has no recognisable legs).
 	Motion       *MotionTracker
-	ref          *Reference
+	refs         []Reference
 	prevProgress float64
 }
 
@@ -76,9 +76,7 @@ type foot struct {
 func New(base body.Body, cfg Scenario, seed int64) *Env {
 	e := &Env{Cfg: cfg, Base: base, rng: rand.New(rand.NewSource(seed))}
 	if cfg.Reference != "" {
-		if r, err := LoadReference(cfg.Reference); err == nil { // validated with the scenario
-			e.ref = &r
-		}
+		e.refs, _ = LoadReferences(cfg.Reference) // validated with the scenario
 	}
 	e.Loop = command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, e.rng)
 	e.Reset()
@@ -115,11 +113,7 @@ func (e *Env) Reset() {
 	}
 	e.prevP = e.W.Base.P
 	e.up = e.W.Upright()
-	e.Motion = nil
-	if e.ref != nil {
-		e.Motion = NewMotionTracker(*e.ref, m)
-	}
-	e.track()
+	e.Motion = PickTracker(e.refs, e.W)
 	if e.Motion != nil {
 		e.prevProgress = e.Motion.Progress
 	}
@@ -245,7 +239,7 @@ func (e *Env) potential() float64 {
 // track measures the pose against the human reference, if any.
 func (e *Env) track() {
 	if e.Motion != nil {
-		e.Motion.Update(e.W, obs.ReadIMU(e.W).Pitch)
+		e.Motion.Update(e.W)
 	}
 }
 

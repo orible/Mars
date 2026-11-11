@@ -33,8 +33,10 @@ type Scenario struct {
 	// get-ups succeed and back down if they stop.
 	StartLevel float64 `json:"startLevel"`
 	Curriculum bool    `json:"curriculum"`
-	// Reference is a human motion to imitate while getting up (a
-	// built-in name from env/references, or a .json file); "" for none.
+	// Reference lists human motions to imitate while getting up
+	// (comma-separated built-in names from env/references, or .json
+	// files); each episode tracks the one its start pose fits best. ""
+	// for none.
 	Reference string `json:"reference"`
 
 	RandomBodyFrac float64    `json:"randomBodyFrac"` // fraction of episodes on a random body instead of the base spec
@@ -51,6 +53,10 @@ type Scenario struct {
 	UnassistedFrac float64 `json:"unassistedFrac"`
 }
 
+// allRises are the human getting-up references: one from the sit-to-stand
+// literature, three from CMU motion capture.
+const allRises = "squat-to-stand,kneel-to-stand,floor-to-stand,side-to-stand"
+
 func flatWorld() world.RandomConfig {
 	return world.RandomConfig{Count: 1, Distance: [2]float64{1, 1}, Friction: [2]float64{0.5, 1.1}, Arrive: 0.4}
 }
@@ -59,7 +65,7 @@ func flatWorld() world.RandomConfig {
 var Scenarios = map[string]Scenario{
 	"getup": {
 		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
-		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: "squat-to-stand",
+		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: allRises,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 10,
 	},
 	"stand": {
@@ -75,7 +81,7 @@ var Scenarios = map[string]Scenario{
 	},
 	"life": {
 		Description: "everything at once: start on the floor or standing, get up, walk where told, get pushed, fall and get back up",
-		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false, StartLevel: 1, Reference: "squat-to-stand",
+		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false, StartLevel: 1, Reference: allRises,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 15, PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3},
 		Assist: 0.5, UnassistedFrac: 0.3,
 	},
@@ -126,7 +132,7 @@ func ListScenarios(dir string) []ScenarioInfo {
 	return out
 }
 
-func referenceOK(s string) bool { _, err := LoadReference(s); return err == nil }
+func referenceOK(s string) bool { _, err := LoadReferences(s); return err == nil }
 
 // ScenarioNames lists the built-ins.
 func ScenarioNames() []string {

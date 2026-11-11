@@ -156,16 +156,57 @@ func TestSquatToStandReference(t *testing.T) {
 		t.Fatalf("expected two legs to track, got %v", tr)
 	}
 	stand := model.NewWorld(e.W.M, true)
-	tr.Update(stand, 0)
+	tr.Update(stand)
 	t.Logf("standing: progress %.2f, error %.1f deg", tr.Progress, tr.Error*180/math.Pi)
 	if tr.Progress < 0.95 || tr.Error > 0.05 {
 		t.Errorf("standing should be the end of the reference")
 	}
 	floorPose(e.W, rand.New(rand.NewSource(2)), 0)
-	tr.Update(e.W, -math.Asin(e.W.Up()[0]))
+	tr.Update(e.W)
 	t.Logf("squat start: progress %.2f, error %.1f deg", tr.Progress, tr.Error*180/math.Pi)
 	if tr.Progress < 0.3 || tr.Progress > 0.8 || tr.Error > 20*math.Pi/180 {
 		t.Errorf("the squat start should match the human around seat-off, got progress %.2f, error %.1f deg", tr.Progress, tr.Error*180/math.Pi)
+	}
+}
+
+// Every built-in reference loads and retargets to the biped, standing is
+// the end of each, and each floor start picks a reference that fits it.
+func TestRiseReferences(t *testing.T) {
+	refs, err := LoadReferences(allRises)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != len(ReferenceNames()) {
+		t.Errorf("allRises lists %d references, %d are built in", len(refs), len(ReferenceNames()))
+	}
+	sc, _ := LoadScenario("getup")
+	sc.RandomBodyFrac = 0
+	e := New(biped(t), sc, 1)
+	stand := model.NewWorld(e.W.M, true)
+	for _, r := range refs {
+		tr := NewMotionTracker(r, e.W.M)
+		if tr == nil {
+			t.Fatalf("%s: cannot retarget to the biped", r.Name)
+		}
+		tr.Update(stand)
+		if tr.Progress < 0.9 || tr.Error > 10*math.Pi/180 {
+			t.Errorf("%s: standing reads as %.0f%% along, %.0f deg off; want the end", r.Name, 100*tr.Progress, tr.Error*180/math.Pi)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		d    float64
+	}{{"squat", 0}, {"kneel", 0.3}, {"sit", 0.6}, {"lying", 0.9}} {
+		w := model.NewWorld(e.W.M, true)
+		floorPose(w, rand.New(rand.NewSource(5)), c.d)
+		for i := 0; i < int(0.3/PhysicsDt); i++ {
+			w.Step(PhysicsDt)
+		}
+		tr := PickTracker(refs, w)
+		t.Logf("%s start tracks %q: %.0f%% along, %.0f deg off", c.name, tr.Ref.Name, 100*tr.Progress, tr.Error*180/math.Pi)
+		if tr.Progress > 0.9 {
+			t.Errorf("%s start should not read as nearly standing", c.name)
+		}
 	}
 }
 

@@ -189,7 +189,18 @@ Most world-model basics are learned in simulation; real hardware only receives p
   - **Tracking is state-based:** each step finds the nearest point on the reference path. While down, being close to the human pose and moving along the path towards standing both pay, capped below what being up pays.
   - **No new network inputs,** so references can be added without retraining from scratch.
   - **The balanced squat start matches the human at about seat-off** (64% along, 12° rms off), so the reference mainly teaches the extension phase.
-  - **Gap:** no published kinematics for rising from kneeling or lying without hands were found, so those rungs have no reference yet. A motion-capture clip (CMU or AMASS floor-rise recordings) would fill it.
+  - **Motion capture fills the floor rungs.** Two CMU takes of subject 114 getting up off the floor (114_02, 114_11; free for research and commercial use per CMU) are turned into three references by `cmd/mocapref`:
+    - kneel-to-stand
+    - floor-to-stand (from lying on the back)
+    - side-to-stand
+  - **Calibration:** angles are measured relative to her standing pose. Both takes agree on it (about 31° lean, 45° hips, 31° knees, from marker placement and posture).
+  - **Ankles are left out,** because the foot data disagree between legs.
+  - **The hand-supported moments are imitated by the legs and trunk only.** The subject was pregnant and can use her hands; the robot has no arms.
+  - **Each episode tracks the reference that best fits its start:**
+    - squat → squat-to-stand
+    - kneel → side-to-stand
+    - sit or lying → floor-to-stand
+  - **The raw recordings stay out of git** (`sim/mocap/cmu-*`). Only the extracted keyframes, with attribution, are committed.
 - **Scenarios** (`-scenario` on the trainer and the sim server) choose the mix:
   - `getup`: always start on the floor.
   - `stand`: stand through pushes.

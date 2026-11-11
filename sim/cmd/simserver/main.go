@@ -334,17 +334,16 @@ func (s *sim) restart() {
 	s.fallenAt = -1
 	s.up = true
 	s.newWorld(geom.V3{})
-	s.motion = nil
-	if s.scen.Reference != "" {
-		if ref, err := env.LoadReference(s.scen.Reference); err == nil {
-			s.motion = env.NewMotionTracker(ref, s.world.M)
-		}
-	}
 	if s.floating && s.rng.Float64() < s.scen.LyingFrac {
 		env.FloorStart(s.world, s.rng, s.scen.StartLevel)
 		if !s.world.Upright() {
 			s.up, s.fallenAt = false, t
 		}
+	}
+	// Track whichever human reference fits how this start looks.
+	s.motion = nil
+	if refs, err := env.LoadReferences(s.scen.Reference); err == nil && len(refs) > 0 {
+		s.motion = env.PickTracker(refs, s.world)
 	}
 }
 
@@ -415,7 +414,7 @@ func (s *sim) frame() Frame {
 	f.Scenario, f.StartLevel = s.scen.Name, s.scen.StartLevel
 	f.Follow, f.Training = s.ctl.get()
 	if s.motion != nil && w.Floating {
-		s.motion.Update(w, imu.Pitch)
+		s.motion.Update(w)
 		f.Reference = &RefFrame{Name: s.motion.Ref.Name, Progress: s.motion.Progress, ErrorDeg: s.motion.Error * 180 / math.Pi, Active: !s.up}
 	}
 	if o, ok := s.tracker.Objective(); ok {
