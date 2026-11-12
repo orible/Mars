@@ -201,6 +201,8 @@ The sim server runs at real time so the view is watchable. Add `-speed 4` to fas
 
 ## Test worlds
 
+> **Phase 2, suspended.** These terrain worlds are not part of Phase 1 and are on hold until Phase 1 (balance, get up, walk to commanded targets) is done. They live on this branch only and are not merged anywhere.
+
 Worlds for testing walking and, later, stereo vision: stairs, octave-noise ground, slopes, ramps and scattered objects. Each one is a scenario (`walk` on the base body, no pushes, no harness, no random bumps, ends on a fall) whose objective is the far end of the course. Nothing trains on them yet. Watch one with the observer's scenario picker, or start the server on it:
 
 ```bash
