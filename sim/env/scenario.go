@@ -91,6 +91,12 @@ var Scenarios = map[string]Scenario{
 		PushEvery: 3, PushSpeed: [2]float64{0.1, 0.3},
 		StuckSeconds: 4,
 	},
+	"balance": {
+		Description: "stand still on the stop command, held at first by a fading harness, before any pushes: the balance a baby has before it can stay up after rising",
+		World:       flatWorld(), EndOnFall: true,
+		RandomBodyFrac: 0.5, EpisodeSeconds: 10, RoughFloor: 0.01,
+		Assist: 1, UnassistedFrac: 0.3,
+	},
 	"stand": {
 		Description: "stand still on the stop command through random pushes",
 		World:       flatWorld(), EndOnFall: true,
