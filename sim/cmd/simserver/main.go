@@ -111,25 +111,25 @@ type HitFrame struct {
 }
 
 type Frame struct {
-	T         float64        `json:"t"`
-	BodyName  string         `json:"body"`
-	BodyRev   int            `json:"bodyRev"`
-	Floating  bool           `json:"floating"`
-	Mass      float64        `json:"mass"`
-	CoG       geom.V3        `json:"cog"`
-	Pelvis    geom.V3        `json:"pelvis"`
-	Yaw       float64        `json:"yaw"` // rad, heading about up (0 = +x, positive turns left)
-	Pitch     float64        `json:"pitch"`
-	Roll      float64        `json:"roll"`
-	Falls     int            `json:"falls"`
-	Supply    float64        `json:"supply"`
-	Links     []LinkFrame    `json:"links"`
-	Cylinders []CylFrame     `json:"cylinders"`
-	Contacts  []ContactFrame `json:"contacts"`
-	Tendons   []TendonFrame  `json:"tendons"`
+	T         float64         `json:"t"`
+	BodyName  string          `json:"body"`
+	BodyRev   int             `json:"bodyRev"`
+	Floating  bool            `json:"floating"`
+	Mass      float64         `json:"mass"`
+	CoG       geom.V3         `json:"cog"`
+	Pelvis    geom.V3         `json:"pelvis"`
+	Yaw       float64         `json:"yaw"` // rad, heading about up (0 = +x, positive turns left)
+	Pitch     float64         `json:"pitch"`
+	Roll      float64         `json:"roll"`
+	Falls     int             `json:"falls"`
+	Supply    float64         `json:"supply"`
+	Links     []LinkFrame     `json:"links"`
+	Cylinders []CylFrame      `json:"cylinders"`
+	Contacts  []ContactFrame  `json:"contacts"`
+	Tendons   []TendonFrame   `json:"tendons"`
 	Colliders []ColliderFrame `json:"colliders"`
 	Hits      []HitFrame      `json:"hits"`
-	Floor     []model.Wave   `json:"floor,omitempty"` // floor bumps (flat when empty)
+	Floor     []model.Wave    `json:"floor,omitempty"` // floor bumps (flat when empty)
 	// Command loop: what the LLM (or its stand-in) was told and said.
 	Objective *world.XZ       `json:"objective"`
 	Reached   int             `json:"reached"`
@@ -199,6 +199,9 @@ type sim struct {
 	world    *model.World
 	rev      int
 	pol      *policy.SetPolicy
+	polName  string              // where the weights came from, for the network view
+	cache    *policy.PolicyCache // the latest policy decision's forward pass
+	cachePol *policy.SetPolicy   // the weights that made it
 	floating bool
 	hold     bool
 	fallenAt float64 // sim time the robot fell, or -1
@@ -305,6 +308,7 @@ func (s *sim) reset(b body.Body) error {
 	s.world = model.NewWorld(m, s.floating)
 	s.restart()
 	s.rev++
+	s.cache = nil // its tokens belong to the previous body
 	limited := 0
 	s.reach = m.Reach(200)
 	for _, r := range s.reach {
@@ -329,7 +333,11 @@ func (s *sim) control() {
 	}
 	if !s.hold && s.tick%env.PolicyEvery == 0 {
 		s.command()
-		copy(w.Cmd, s.pol.Act(obs.Build(w, obs.ReadIMU(w), s.cmd)))
+		// Same as s.pol.Act, keeping the forward pass for the network view.
+		if o := obs.Build(w, obs.ReadIMU(w), s.cmd); len(o.Tokens) > 0 {
+			s.cache, s.cachePol = s.pol.Forward(o), s.pol
+			copy(w.Cmd, s.cache.Mu)
+		}
 	}
 	s.tick++
 	if s.push > 0 && w.Floating && s.up && s.rng.Float64() < controlDt/s.push {
@@ -504,6 +512,64 @@ func (s *sim) frame() Frame {
 			Cables: m.RoutePoints(w.Pose, k, false), ForceControl: c.P.PressureControl, BoreArea: c.P.BoreArea, RodArea: c.P.RodArea,
 		})
 	}
+	return f
+}
+
+// NetFrame is the network view's payload: the latest policy decision's
+// activations (policy.Activations, rounded to 3 decimals to keep it
+// small) with names for its tokens and features. Only clients that ask
+// for it (/ws?net=1) get it, appended to each frame as "net".
+type NetFrame struct {
+	Policy   string    `json:"policy"`
+	Labels   NetLabels `json:"labels"`
+	Features NetLabels `json:"features"`
+	*policy.Activations
+}
+
+// NetLabels names one thing per token (Labels) or per feature (Features,
+// which also names the global vector's features).
+type NetLabels struct {
+	Tokens  []string `json:"tokens"`
+	Parts   []string `json:"parts"`
+	Sensors []string `json:"sensors"`
+	Global  []string `json:"global,omitempty"`
+}
+
+func round3(v []float64) []float64 {
+	out := make([]float64, len(v))
+	for i, x := range v {
+		out[i] = math.Round(x*1000) / 1000
+	}
+	return out
+}
+
+func round3s(vs [][]float64) [][]float64 {
+	out := make([][]float64, len(vs))
+	for i, v := range vs {
+		out[i] = round3(v)
+	}
+	return out
+}
+
+// net returns the network view's payload, or nil before the first policy
+// decision (and while -hold keeps the policy from running).
+func (s *sim) net() *NetFrame {
+	if s.cache == nil {
+		return nil
+	}
+	a := s.cachePol.Activations(s.cache)
+	r := *a // rounded copies; the cache itself stays untouched
+	r.Global, r.PartPool, r.SensorPool, r.TokenPool = round3(a.Global), round3(a.PartPool), round3(a.SensorPool), round3(a.TokenPool)
+	r.Parts, r.PartEmb, r.Sensors, r.SensorEmb = round3s(a.Parts), round3s(a.PartEmb), round3s(a.Sensors), round3s(a.SensorEmb)
+	r.Tokens, r.PhiHid, r.TokenEmb = round3s(a.Tokens), nil, round3s(a.TokenEmb) // the view doesn't draw φ's hidden layer
+	r.Pre, r.Mu = round3(a.Pre), round3(a.Mu)
+	r.RhoHid = make([][][]float64, len(a.RhoHid))
+	for i, h := range a.RhoHid {
+		r.RhoHid[i] = round3s(h)
+	}
+	f := &NetFrame{Policy: s.polName, Activations: &r,
+		Features: NetLabels{Tokens: obs.TokenFeatures, Parts: obs.PartFeatures, Sensors: obs.SensorFeatures, Global: obs.GlobalFeatures}}
+	f.Labels.Tokens, f.Labels.Parts, f.Labels.Sensors = obs.Labels(s.world)
 	return f
 }
 
@@ -685,9 +751,16 @@ func main() {
 		go watch(ctx, *bodyPath, bodies)
 	}
 
-	var latest atomic.Pointer[[]byte]
+	// latest is the newest frame; latestNet the same frame with the network
+	// view's activations, built only while a client wants them.
+	var latest, latestNet atomic.Pointer[[]byte]
+	var netClients atomic.Int32
+	polName := "random weights (no -policy)"
+	if *ckpt != "" {
+		polName = *ckpt
+	}
 	go func() {
-		s := &sim{pol: pol, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng, scen: scen,
+		s := &sim{pol: pol, polName: polName, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng, scen: scen,
 			switches: switches, ctl: ctl,
 			worldCfg: worldCfg, external: *commander == "external", llm: link, assist: *assist,
 			loop: command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, rng)}
@@ -726,6 +799,17 @@ func main() {
 				log.Printf("marshal frame: %v", err)
 			} else {
 				latest.Store(&data)
+				if netClients.Load() > 0 {
+					// Splice "net" into the frame object rather than marshal it twice.
+					if nd, err := json.Marshal(s.net()); err != nil {
+						log.Printf("marshal activations: %v", err)
+					} else {
+						both := make([]byte, 0, len(data)+len(nd)+8)
+						both = append(append(append(both, data[:len(data)-1]...), `,"net":`...), nd...)
+						both = append(both, '}')
+						latestNet.Store(&both)
+					}
+				}
 			}
 			if *speed > 0 {
 				<-tick.C
@@ -742,6 +826,13 @@ func main() {
 		cctx := c.CloseRead(r.Context())
 		tick := time.NewTicker(frameDt)
 		defer tick.Stop()
+		// ?net=1: the network view also wants the policy's activations.
+		src := &latest
+		if r.URL.Query().Get("net") != "" {
+			netClients.Add(1)
+			defer netClients.Add(-1)
+			src = &latestNet
+		}
 		var sent *[]byte
 		for {
 			select {
@@ -749,7 +840,7 @@ func main() {
 				return
 			case <-tick.C:
 			}
-			if d := latest.Load(); d != nil && d != sent {
+			if d := src.Load(); d != nil && d != sent {
 				if err := c.Write(cctx, websocket.MessageText, *d); err != nil {
 					return
 				}

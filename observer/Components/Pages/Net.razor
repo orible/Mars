@@ -1,0 +1,55 @@
+@page "/net"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<PageTitle>Mars observer · network</PageTitle>
+
+<header class="bar">
+    <h1>Mars observer · network</h1>
+    <input @bind="url" class="url" aria-label="Simulator WebSocket URL" />
+    <button @onclick="Connect">Connect</button>
+    <span class="status" @ref="status">idle</span>
+    <a class="nav" href="/">2D view</a>
+    <a class="nav" href="/3d">3D view</a>
+</header>
+
+<p class="watching">
+    The set policy's activations, live: one row per token, each lane sharing one network and pooling into its bottom row.
+    Hover any cell for its numbers.
+</p>
+
+<canvas @ref="canvas" class="netview"></canvas>
+
+@code {
+    private ElementReference canvas;
+    private ElementReference status;
+    private IJSObjectReference? module;
+    private string url = "ws://localhost:8080/ws";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        module = await JS.InvokeAsync<IJSObjectReference>("import", "./net.js");
+        await Connect();
+    }
+
+    private async Task Connect()
+    {
+        if (module is null) return;
+        await module.InvokeVoidAsync("connect", url, canvas, status);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (module is null) return;
+        try
+        {
+            await module.InvokeVoidAsync("disconnect");
+            await module.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+}

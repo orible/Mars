@@ -26,7 +26,7 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 | `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec and the policy checkpoint, streams frames on `ws://localhost:8080/ws` |
 | `sim/bodies` | Body specs; edit these as hardware measurements come in |
 | `tools/blender` | Blender add-on: import a body spec as an armature with pins, contacts and collision capsules, edit it, export it back |
-| `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG; a 3D orbit view at `/3d` with every link, joint axis, anchor, cylinder (by chamber pressure), cable, tendon (by tension), sole pad (by load) and collision capsule |
+| `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG; a 3D orbit view at `/3d` with every link, joint axis, anchor, cylinder (by chamber pressure), cable, tendon (by tension), sole pad (by load) and collision capsule; a network view at `/net` with the policy's live activations |
 
 ## Set up
 
@@ -124,7 +124,7 @@ cd sim && go test ./... && go run ./cmd/simserver
 dotnet run --project observer
 ```
 
-Open http://localhost:5217, or http://localhost:5217/3d for the 3D view (drag to orbit, right-drag to pan, wheel to zoom, F to follow, hover for numbers). Edit `sim/bodies/biped.json` and the server reloads it within a second, still running the same weights. An invalid edit is rejected with a reason, and the previous body keeps running.
+Open http://localhost:5217, or http://localhost:5217/3d for the 3D view (drag to orbit, right-drag to pan, wheel to zoom, F to follow, hover for numbers). http://localhost:5217/net shows what the policy network is doing, live. Each token (body part, sensor, cylinder) is a row: its normalised input, its embedding from the shared network, and its share of the pooled mean, with the dominant tokens named. Cylinder rows also show ρ's hidden layer and the command μ ± σ. Hover any cell for its numbers. The page asks for activations with `ws://…/ws?net=1`, so other viewers' frames stay unchanged. Run the sim server with `-policy checkpoints/policy.json` to see trained weights; without it the weights are random. Edit `sim/bodies/biped.json` and the server reloads it within a second, still running the same weights. An invalid edit is rejected with a reason, and the previous body keeps running.
 
 Check how much joint range each cylinder's stroke allows for a spec:
 
