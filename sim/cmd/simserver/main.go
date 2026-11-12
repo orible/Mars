@@ -336,7 +336,7 @@ func (s *sim) control() {
 		// Same as s.pol.Act, keeping the forward pass for the network view.
 		if o := obs.Build(w, obs.ReadIMU(w), s.cmd); len(o.Tokens) > 0 {
 			s.cache, s.cachePol = s.pol.Forward(o), s.pol
-			copy(w.Cmd, s.cache.Mu)
+			w.SetActionTargets(s.cache.Mu) // targets for the servo, like training
 		}
 	}
 	s.tick++

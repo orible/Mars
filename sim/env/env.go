@@ -271,7 +271,11 @@ func (e *Env) Observe() *policy.Obs {
 // PolicyDt, and returns the reward, whether the episode ended for good
 // (diverged, or fell in a scenario that ends on falls), and whether the
 // time limit ended it (truncated, so the return should be bootstrapped).
-func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
+//
+// actions are one per cylinder in −1..1: target extensions around the
+// standing pose, which the servo (model.World.SetActionTargets) drives the
+// valves to reach every physics step.
+func (e *Env) Step(actions []float64) (r float64, terminal, truncated bool) {
 	w := e.W
 	if e.Cfg.Walk && e.up {
 		e.Cmd = e.Loop.Update(w.T, e.Tracker.Perceive(w.T, w.Base.P, w.Base.R, false))
@@ -280,9 +284,7 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 		e.Loop.Reset(w.T)
 	}
 	e.carry()
-	for k := range w.Cmd {
-		w.Cmd[k] = math.Max(-1, math.Min(1, valves[k]))
-	}
+	w.SetActionTargets(actions)
 	e.prevP = w.Base.P
 	for i := 0; i < PolicyEvery*Substeps; i++ {
 		w.Step(PhysicsDt)
@@ -317,9 +319,9 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 	e.up = up
 	e.track()
 	if up {
-		r = e.upReward(valves)
+		r = e.upReward(actions)
 	} else {
-		r = e.downReward(valves)
+		r = e.downReward(actions)
 	}
 	if e.Cfg.PushEvery > 0 && up && e.rng.Float64() < PolicyDt/e.Cfg.PushEvery {
 		a := e.rng.Float64() * 2 * math.Pi
@@ -396,7 +398,7 @@ func (e *Env) downReward(valves []float64) float64 {
 	pot := e.potential()
 	shaping := 2 * (pot - e.prevPot)
 	e.prevPot = pot
-	r := 0.08*pot + 0.04*e.overFeet() + shaping - 0.02*effort(valves)
+	r := 0.08*pot + 0.04*e.overFeet() + shaping - 0.02*effort(e.W.Cmd)
 	if m := e.Motion; m != nil {
 		close := math.Exp(-m.Error * m.Error / 0.09) // ~17° rms error halves it
 		r += 0.06*close + 1.0*close*(m.Progress-e.prevProgress)
@@ -419,7 +421,7 @@ func (e *Env) upReward(valves []float64) float64 {
 	height := math.Abs(w.Base.P[1]/e.h0 - 1)
 	// The head carries the sensors: keep it level as well as the pelvis.
 	headTilt := 1 - w.Pose.R[e.head][1][1]
-	upright := math.Exp(-(10*tilt + 5*height + 6*headTilt + 0.1*w.Base.W.Norm() + 0.2*effort(valves)))
+	upright := math.Exp(-(10*tilt + 5*height + 6*headTilt + 0.1*w.Base.W.Norm() + 0.2*effort(e.W.Cmd)))
 
 	// Pelvis velocity over the step, in the heading frame.
 	yaw := math.Atan2(-w.Base.R[2][0], w.Base.R[0][0])

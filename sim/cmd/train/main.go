@@ -96,6 +96,7 @@ func main() {
 	rough := flag.Float64("rough-floor", -1, "largest floor bump in m (default: the scenario's; 0 = flat)")
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "goroutines computing gradients (default: logical CPUs; physical cores can be faster)")
 	flag.IntVar(&cfg.Epochs, "epochs", cfg.Epochs, "passes over each batch per iteration")
+	sigma := flag.Float64("sigma", 0, "set the exploration noise σ (of an action) at the start; 0 keeps the checkpoint's, or the default for a new network")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile here (go tool pprof) to see where training time goes")
 	attn := flag.Bool("attn", false, "let the cylinder tokens attend to each other before ρ (added to a resumed network without changing its outputs; a checkpoint that has it keeps it)")
 	attnHeads := flag.Int("attn-heads", 4, "attention heads (with -attn)")
@@ -140,6 +141,11 @@ func main() {
 			log.Fatalf("%s does not match the critic's inputs; train a new network (drop -resume)", valPath)
 		}
 		pol.LogStd[0] = math.Max(ppo.MinLogStd, pol.LogStd[0]) // restore exploration if it had collapsed
+	}
+	if *sigma > 0 {
+		pol.LogStd[0] = math.Log(*sigma)
+	}
+	if *resume {
 		log.Printf("resumed from %s (exploration σ %.2f)", *out, pol.Std())
 	}
 	if *attn && pol.Attn == nil {

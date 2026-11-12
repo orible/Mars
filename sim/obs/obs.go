@@ -33,11 +33,11 @@ import (
 
 // Version is the feature layout. Checkpoints record it, and one trained
 // on another layout is refused.
-const Version = 3
+const Version = 4 // 4: cylinder tokens end with the servo target error
 
 // Feature sizes.
 const (
-	TokenDim  = 20
+	TokenDim  = 21
 	PartDim   = 19
 	SensorDim = 11
 	GlobalDim = 19
@@ -129,6 +129,7 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 			tq[0][0], tq[0][1], tq[0][2],
 			tq[1][0], tq[1][1], tq[1][2],
 			force,
+			w.TargetError(k), // where the servo is taking it, fraction of stroke
 		}
 	}
 

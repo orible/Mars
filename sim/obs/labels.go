@@ -10,7 +10,7 @@ import (
 var (
 	TokenFeatures = []string{"stroke pos", "rod speed", "cap press", "rod press", "spool", "strength", "area ratio",
 		"base x", "base y", "base z", "rod x", "rod y", "rod z",
-		"twist1 x", "twist1 y", "twist1 z", "twist2 x", "twist2 y", "twist2 z", "force ctl"}
+		"twist1 x", "twist1 y", "twist1 z", "twist2 x", "twist2 y", "twist2 z", "force ctl", "target err"}
 	PartFeatures = []string{"pos x", "pos y", "pos z", "up x", "up y", "up z", "fwd x", "fwd y", "fwd z",
 		"vel x", "vel y", "vel z", "mass", "reach", "extent x", "extent y", "extent z", "load", "height"}
 	SensorFeatures = []string{"pos x", "pos y", "pos z", "local x", "local z", "pressure", "shear/press",

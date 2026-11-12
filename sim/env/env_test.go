@@ -337,10 +337,16 @@ func TestGetUpEpisode(t *testing.T) {
 		t.Fatalf("getup episode should start down: lying=%v up=%v; pelvis %.3f of %.3f m, up axis %v, q %v",
 			e.StartedLying, e.up, e.W.Base.P[1], e.h0, e.W.Up(), e.W.Q)
 	}
-	still := make([]float64, len(e.W.Cmd))
+	// Actions that hold the current pose (0 would aim at the standing pose).
+	hold := make([]float64, len(e.W.Cmd))
+	for k, c := range e.W.M.Cyl {
+		if !c.P.PressureControl {
+			hold[k] = (e.W.Len[k] - c.Retracted - e.W.Neutral[k]) / (model.ActionReach * c.P.Stroke)
+		}
+	}
 	best := 0.0
-	for i := 0; i < 100; i++ { // 1 s on the floor with valves closed
-		r, terminal, _ := e.Step(still)
+	for i := 0; i < 100; i++ { // 1 s on the floor, holding still
+		r, terminal, _ := e.Step(hold)
 		if terminal {
 			t.Fatal("episode ended while on the floor")
 		}
@@ -356,7 +362,7 @@ func TestGetUpEpisode(t *testing.T) {
 	st, _ := LoadScenario("stand")
 	st.RandomBodyFrac, st.PushEvery = 0, 0
 	u := New(biped(t), st, 4)
-	r, terminal, _ := u.Step(still)
+	r, terminal, _ := u.Step(make([]float64, len(u.W.Cmd))) // 0: hold the standing pose
 	if terminal || !u.up || r < 0.2 {
 		t.Fatalf("standing still: reward %.3f, up %v, terminal %v", r, u.up, terminal)
 	}

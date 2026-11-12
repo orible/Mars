@@ -123,6 +123,12 @@ type World struct {
 	Qd       []float64
 	Cyl      []hydraulics.State
 	Cmd      []float64 // valve commands, one per cylinder, in [-1, 1]
+	// Servo drives the valves from Targets every step (see servo.go);
+	// otherwise Cmd is used as set. Neutral is each cylinder's extension
+	// in the standing pose, where an action of 0 aims.
+	Servo   bool
+	Targets []float64
+	Neutral []float64
 	Len      []float64 // cylinder pin-to-pin lengths for the current pose
 	DLdq     [][]float64
 	Pose     *Pose
@@ -200,10 +206,13 @@ func NewWorld(m *Model, floating bool) *World {
 		w.Base.P = geom.V3{0, w.standH, 0}
 	}
 	w.refresh()
+	w.Targets, w.Neutral = make([]float64, len(m.Cyl)), make([]float64, len(m.Cyl))
 	for k, c := range m.Cyl {
 		w.Cyl[k] = hydraulics.NewState(c.P, m.Supply)
 		w.Cyl[k].X = w.Len[k] - c.Retracted
+		w.Neutral[k] = math.Max(0, math.Min(c.P.Stroke, w.Cyl[k].X))
 	}
+	w.HoldPose()
 	return w
 }
 
@@ -247,6 +256,7 @@ func (w *World) Place(r geom.M3, q []float64, x, z float64) {
 	}
 	w.SelfHits = w.SelfHits[:0]
 	w.Harness = Harness{}
+	w.HoldPose() // the servo holds the new pose until told otherwise
 }
 
 // StandHeight is the pelvis height at which the lowest contact point or
@@ -385,6 +395,9 @@ func (w *World) Step(dt float64) {
 	m, nb := w.M, w.nb
 	for i := range w.gen {
 		w.gen[i] = 0
+	}
+	if w.Servo {
+		w.servoCommands()
 	}
 	for k := range m.Cyl {
 		c := &m.Cyl[k]

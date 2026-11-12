@@ -52,10 +52,11 @@ type Config struct {
 // second forward and backward pass).
 const symEvery = 4
 
-// MinLogStd is the floor on the exploration noise (σ = 0.2 of full valve
-// opening): below it, training stops trying new things before the hard
-// skills (getting up) are found.
-var MinLogStd = math.Log(0.2)
+// MinLogStd is the floor on the exploration noise: σ = 0.05 of an action,
+// a target 2.5% of a stroke off. It was 0.2 when actions were valve
+// openings, to keep exploring; with servo targets, standing still needs
+// the noise to be able to get small.
+var MinLogStd = math.Log(0.05)
 
 func Defaults() Config {
 	return Config{Envs: 24, Steps: 256, Gamma: 0.99, Lambda: 0.95, Clip: 0.2, LR: 3e-4, VLR: 1e-3,
