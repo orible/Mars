@@ -189,8 +189,24 @@ type SetPolicy struct {
 	GloNorm  *Normalizer `json:"globalNorm"`
 }
 
-// New creates a randomly initialised policy.
+// New creates a randomly initialised policy. Its command head's last
+// layer starts at 1% of the usual size, so a new policy commands about 0
+// for every actuator: with servo targets that is "hold the standing pose",
+// and learning starts from a body that stands rather than one aiming every
+// cylinder somewhere random.
 func New(rng *rand.Rand, tokenDim, partDim, sensorDim, globalDim, embed, hidden int) *SetPolicy {
+	p := newPolicy(rng, tokenDim, partDim, sensorDim, globalDim, embed, hidden)
+	last := &p.Rho.Layers[len(p.Rho.Layers)-1]
+	for i := range last.W {
+		last.W[i] *= 0.01
+	}
+	for i := range last.B {
+		last.B[i] = 0
+	}
+	return p
+}
+
+func newPolicy(rng *rand.Rand, tokenDim, partDim, sensorDim, globalDim, embed, hidden int) *SetPolicy {
 	g2 := globalDim + 2*embed
 	return &SetPolicy{
 		TokenDim: tokenDim, PartDim: partDim, SensorDim: sensorDim, GlobalDim: globalDim, Embed: embed,

@@ -60,7 +60,7 @@ var MinLogStd = math.Log(0.05)
 
 func Defaults() Config {
 	return Config{Envs: 24, Steps: 256, Gamma: 0.99, Lambda: 0.95, Clip: 0.2, LR: 3e-4, VLR: 1e-3,
-		Epochs: 5, Minibatch: 512, Entropy: 0, TargetKL: 0.03, DesiredKL: 0.01, MinLR: 1e-5, MaxLR: 1e-3,
+		Epochs: 5, Minibatch: 512, Entropy: 0, TargetKL: 0.03, DesiredKL: 0.01, MinLR: 5e-5, MaxLR: 1e-3,
 		Symmetry: 0.5, MaxGrad: 1, Workers: runtime.GOMAXPROCS(0)}
 }
 
@@ -313,11 +313,17 @@ func (t *Trainer) Iterate() Stats {
 	t.Pol.UpdateNorms(all)
 	t.Val.UpdateNorms(all)
 	if c := t.Cfg; c.DesiredKL > 0 {
+		// Cut hard when an update overshoots; otherwise creep back up while
+		// updates stay below target. (Raising only below half the target
+		// left the rate stuck wherever a few early large updates had cut
+		// it, 25× below its start.)
 		switch {
 		case st.KL > 2*c.DesiredKL:
 			t.popt.LR = math.Max(c.MinLR, t.popt.LR/1.5)
 		case st.KL < c.DesiredKL/2:
 			t.popt.LR = math.Min(c.MaxLR, t.popt.LR*1.5)
+		case st.KL < c.DesiredKL:
+			t.popt.LR = math.Min(c.MaxLR, t.popt.LR*1.1)
 		}
 	}
 	st.LR = t.popt.LR

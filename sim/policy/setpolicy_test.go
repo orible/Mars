@@ -77,3 +77,20 @@ func TestCheckpointRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A new policy commands about 0 for every actuator (hold the standing
+// pose), whatever it observes.
+func TestNewPolicyStartsNearZero(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	p := New(rng, 10, 7, 4, 8, 32, 64)
+	worst := 0.0
+	for i := 0; i < 20; i++ {
+		out := p.Act(&Obs{Tokens: randTokens(rng, 6, 10), Parts: randTokens(rng, 4, 7), Sensors: randTokens(rng, 3, 4), Global: randTokens(rng, 1, 8)[0]})
+		for _, v := range out {
+			worst = math.Max(worst, math.Abs(v))
+		}
+	}
+	if worst > 0.1 {
+		t.Errorf("a new policy commands up to %.3f; want about 0", worst)
+	}
+}
