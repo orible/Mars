@@ -117,6 +117,13 @@ func (e *Env) Reset() {
 	if e.Cfg.RoughFloor > 0 && e.rng.Float64() < 0.75 { // a quarter of episodes stay on a plain floor
 		roughen(&e.W.Ground, e.rng, e.Cfg.RoughFloor)
 	}
+	if e.Cfg.Terrain != nil {
+		objs, err := ApplyTerrain(e.W, *e.Cfg.Terrain, e.rng.Int63(), wl.Objectives)
+		if err != nil {
+			panic(err) // validated with the scenario
+		}
+		wl.Objectives = objs
+	}
 	e.sense = newSenseNoise(e.rng, len(m.Sensors)+len(m.Tendons))
 	e.h0 = e.W.StandHeight()
 	e.findFeet() // in the neutral standing pose
@@ -154,7 +161,7 @@ func (e *Env) Reset() {
 	}
 	e.Assisted = held && e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
 	if e.Assisted {
-		e.W.Harness = model.Harness{Strength: e.Cfg.Assist, Height: e.h0, Target: e.W.Base.P, Gentle: e.StartedLying}
+		e.W.Harness = model.Harness{Strength: e.Cfg.Assist, Height: e.h0 + e.W.GroundUnder(), Target: e.W.Base.P, Gentle: e.StartedLying}
 	}
 }
 
@@ -193,8 +200,12 @@ func (e *Env) findFeet() {
 		root[m.Contacts[s.Contact].Link] = s.Root
 	}
 	byLink := map[int]int{}
+	lo := math.Inf(1) // the floor under the feet (it may be a step or a slope)
+	for _, c := range m.Contacts {
+		lo = math.Min(lo, m.Point(w.Pose, c.Link, c.Point)[1])
+	}
 	for i, c := range m.Contacts {
-		if m.Point(w.Pose, c.Link, c.Point)[1] > 0.02 {
+		if m.Point(w.Pose, c.Link, c.Point)[1] > lo+0.02 {
 			continue
 		}
 		key := c.Link
@@ -255,7 +266,7 @@ func (e *Env) Observe() *policy.Obs {
 		up = 1
 	}
 	o.Priv = []float64{
-		w.Base.P[1] / e.h0,
+		(w.Base.P[1] - w.GroundUnder()) / e.h0,
 		v[0], v[1], v[2],
 		w.Ground.Mu,
 		w.Harness.Strength,
@@ -352,7 +363,7 @@ const StayUpSeconds = 2.0
 // feet and sits it back down; humans keep leaning forward until the legs
 // have done most of the work (the references reward that lean).
 func (e *Env) potential() float64 {
-	h := math.Max(0, math.Min(1, e.W.Base.P[1]/e.h0))
+	h := math.Max(0, math.Min(1, (e.W.Base.P[1]-e.W.GroundUnder())/e.h0))
 	return 0.9*h + 0.1*math.Max(0, e.W.Up()[1])
 }
 
@@ -418,7 +429,7 @@ func (e *Env) upReward(valves []float64) float64 {
 		e.prevProgress = e.Motion.Progress
 	}
 	tilt := 1 - w.Up()[1]
-	height := math.Abs(w.Base.P[1]/e.h0 - 1)
+	height := math.Abs((w.Base.P[1]-w.GroundUnder())/e.h0 - 1)
 	// The head carries the sensors: keep it level as well as the pelvis.
 	headTilt := 1 - w.Pose.R[e.head][1][1]
 	upright := math.Exp(-(10*tilt + 5*height + 6*headTilt + 0.1*w.Base.W.Norm() + 0.2*effort(e.W.Cmd)))

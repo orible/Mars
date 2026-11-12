@@ -1,0 +1,6 @@
+{
+  "base": "stairs-down",
+  "name": "stairs-small-robot",
+  "description": "stairs-down scaled for a 0.6-scale robot: every length (rise, run, width, platform, goal) times 0.6, angles kept",
+  "terrain": { "scale": 0.6 }
+}

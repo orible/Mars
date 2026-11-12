@@ -5,6 +5,7 @@ import (
 
 	"mars/sim/geom"
 	"mars/sim/hydraulics"
+	"mars/sim/terrain"
 )
 
 // Gravity in the world frame.
@@ -49,6 +50,12 @@ type Ground struct {
 	// for a flat floor). MuWaves make friction patchy: Mu is scaled by
 	// 1 + the sum of these waves.
 	Bumps, MuWaves []Wave
+	// Terrain adds test-world shapes (octave-noise ground, slopes, ramps,
+	// stairs, objects) under the bumps; nil keeps the plain floor. With a
+	// terrain, contacts push along the true surface normal (a riser pushes
+	// a toe back, a slope pushes up its fall line); without one the floor
+	// pushes straight up as it always has.
+	Terrain *terrain.Terrain
 }
 
 // Wave is A·cos(Kx·x + Kz·z + Phase).
@@ -62,8 +69,36 @@ func sumWaves(ws []Wave, x, z float64) float64 {
 	return s
 }
 
+// wavesGrad is the sum of the waves and its slope (∂/∂x, ∂/∂z).
+func wavesGrad(ws []Wave, x, z float64) (h, gx, gz float64) {
+	for _, w := range ws {
+		a := w.Kx*x + w.Kz*z + w.Phase
+		c, s := math.Cos(a), math.Sin(a)
+		h += w.A * c
+		gx -= w.A * w.Kx * s
+		gz -= w.A * w.Kz * s
+	}
+	return
+}
+
 // Height is the floor's height under (x, z).
-func (g Ground) Height(x, z float64) float64 { return sumWaves(g.Bumps, x, z) }
+func (g Ground) Height(x, z float64) float64 {
+	h := sumWaves(g.Bumps, x, z)
+	if g.Terrain != nil {
+		h += g.Terrain.Height(x, z)
+	}
+	return h
+}
+
+// TerrainHeight is the height of the terrain alone under (x, z): 0 on the
+// plain floor. Standing and falling are judged against it (smoothed over
+// a stride, see GroundUnder), never against the small bumps.
+func (g Ground) TerrainHeight(x, z float64) float64 {
+	if g.Terrain == nil {
+		return 0
+	}
+	return g.Terrain.Height(x, z)
+}
 
 // MuAt is the friction coefficient at (x, z).
 func (g Ground) MuAt(x, z float64) float64 {
@@ -306,10 +341,33 @@ func (w *World) LengthRate(k int) float64 {
 	return s
 }
 
+// GroundUnder is the terrain's height under the pelvis, averaged over a
+// stride-sized cross (a quarter of standing height each way) so a step
+// edge between the feet does not make it jump. 0 on the plain floor.
+func (w *World) GroundUnder() float64 {
+	g := w.Ground
+	if g.Terrain == nil {
+		return 0
+	}
+	x, z, r := w.Base.P[0], w.Base.P[2], 0.25*w.standH
+	return (g.Terrain.Height(x, z) + g.Terrain.Height(x+r, z) + g.Terrain.Height(x-r, z) +
+		g.Terrain.Height(x, z+r) + g.Terrain.Height(x, z-r)) / 5
+}
+
 // contacts adds ground forces on the contact points and the collider
 // probes to w.gen and records them in ContactF and ProbeF.
 func (w *World) contacts() {
 	m := w.M
+	if w.Ground.Terrain != nil {
+		for i, c := range m.Contacts {
+			w.ContactF[i] = w.terrainFloor(c.Link, m.Point(w.Pose, c.Link, c.Point), 0, &w.touch[i], &w.anchor[i])
+		}
+		for i, pr := range m.Probes {
+			c := m.Capsules[pr.Capsule]
+			w.ProbeF[i] = w.terrainFloor(c.Link, m.Point(w.Pose, c.Link, pr.C), c.R, &w.pTouch[i], &w.pAnchor[i])
+		}
+		return
+	}
 	for i, c := range m.Contacts {
 		w.ContactF[i] = w.floor(c.Link, m.Point(w.Pose, c.Link, c.Point), &w.touch[i], &w.anchor[i])
 	}
@@ -319,6 +377,42 @@ func (w *World) contacts() {
 		p[1] -= c.R // the sphere's lowest point
 		w.ProbeF[i] = w.floor(c.Link, p, &w.pTouch[i], &w.pAnchor[i])
 	}
+}
+
+// terrainFloor is floor for a world with a Terrain: the contact is a
+// sphere of radius r (0 for a contact point) centred at c, and the
+// spring-damper and stick–slip spring act along and across the terrain's
+// surface normal at the nearest point instead of along y.
+func (w *World) terrainFloor(l int, c geom.V3, r float64, touch *bool, anchor *geom.V3) geom.V3 {
+	m, g := w.M, w.Ground
+	bh, bgx, bgz := wavesGrad(g.Bumps, c[0], c[2])
+	d, n := g.Terrain.Distance(c, r+0.01, bh, bgx, bgz)
+	depth := r - d
+	if depth <= 0 {
+		*touch = false
+		return geom.V3{}
+	}
+	p := c.Sub(n.Scale(r)) // the sphere's deepest point
+	v := m.PointVelocity(w.Pose, w.Base.V, w.Base.W, w.Qd, l, p)
+	vn := v.Dot(n)
+	fn := math.Max(0, g.K*depth-g.C*vn)
+	surf := p.Add(n.Scale(depth)) // where p would be on the surface
+	if !*touch {
+		*touch, *anchor = true, surf
+	}
+	// Tangential stick spring towards the anchor, within the surface.
+	dd := surf.Sub(*anchor)
+	dd = dd.Sub(n.Scale(dd.Dot(n)))
+	vt := v.Sub(n.Scale(vn))
+	ft := dd.Scale(-g.Kt).Sub(vt.Scale(g.Ct))
+	if mag, lim := ft.Norm(), g.MuAt(p[0], p[2])*fn; mag > lim {
+		// Slipping: limit to the cone and drag the anchor along.
+		ft = ft.Scale(lim / mag)
+		*anchor = surf.Add(ft.Scale(1 / g.Kt))
+	}
+	f := n.Scale(fn).Add(ft)
+	m.AddPointForce(w.Pose, l, p, f, w.Floating, w.gen)
+	return f
 }
 
 // floor applies the ground's force at world point p on link l, a compliant
@@ -567,16 +661,16 @@ func (w *World) Healthy() bool {
 func (w *World) Up() geom.V3 { return geom.V3{w.Base.R[0][1], w.Base.R[1][1], w.Base.R[2][1]} }
 
 // Fallen reports a floating robot that is tilted past 60° or whose pelvis
-// has dropped below half its standing height.
+// has dropped below half its standing height (above the terrain under it).
 func (w *World) Fallen() bool {
-	return w.Floating && (w.Up()[1] < 0.5 || w.Base.P[1] < 0.5*w.standH)
+	return w.Floating && (w.Up()[1] < 0.5 || w.Base.P[1]-w.GroundUnder() < 0.5*w.standH)
 }
 
 // Upright reports a robot that is standing: pelvis within 30° of
 // vertical and at least 86% of standing height (a 90° squat, about 83%,
 // is not up; walking stays around 95%).
 func (w *World) Upright() bool {
-	return !w.Floating || (w.Up()[1] > 0.85 && w.Base.P[1] > 0.86*w.standH)
+	return !w.Floating || (w.Up()[1] > 0.85 && w.Base.P[1]-w.GroundUnder() > 0.86*w.standH)
 }
 
 // StandH is the neutral standing pelvis height.

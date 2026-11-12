@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"mars/sim/terrain"
 	"mars/sim/world"
 )
 
@@ -69,6 +70,12 @@ type Scenario struct {
 	// observation, to compare training with and without a sense of the
 	// feet.
 	NoSensors bool `json:"noSensors,omitempty"`
+	// Terrain is a test world's shape: octave-noise ground, slopes,
+	// ramps, stairs and scattered objects (see package terrain and
+	// worlds.go). nil keeps the plain floor. A terrain without a seed is
+	// drawn afresh every episode; objects keep clear of the start and
+	// the objectives.
+	Terrain *terrain.Spec `json:"terrain,omitempty"`
 }
 
 // allRises are the human getting-up references: every built-in one (one
@@ -206,6 +213,12 @@ func LoadScenario(s string) (Scenario, error) {
 			return Scenario{}, fmt.Errorf("%s: unknown base scenario %q", s, base.Base)
 		}
 	}
+	if sc.Terrain != nil {
+		// The file's "terrain" merges into the base's, so copy it first:
+		// decoding into the built-in's own spec would change the built-in.
+		t := cloneTerrain(*sc.Terrain)
+		sc.Terrain = &t
+	}
 	if err := json.Unmarshal(data, &sc); err != nil {
 		return Scenario{}, fmt.Errorf("%s: %w", s, err)
 	}
@@ -213,6 +226,13 @@ func LoadScenario(s string) (Scenario, error) {
 		sc.Name = strings.TrimSuffix(s, ".json")
 	}
 	return sc, sc.Validate()
+}
+
+func cloneTerrain(t terrain.Spec) terrain.Spec {
+	data, _ := json.Marshal(t)
+	var out terrain.Spec
+	json.Unmarshal(data, &out)
+	return out
 }
 
 // Validate rejects scenarios the environment cannot run.
@@ -233,6 +253,11 @@ func (s Scenario) Validate() error {
 		return fmt.Errorf("scenario %q: cannot load reference %q", s.Name, s.Reference)
 	case math.IsNaN(s.EpisodeSeconds):
 		return fmt.Errorf("scenario %q: episodeSeconds is not a number", s.Name)
+	}
+	if s.Terrain != nil {
+		if err := s.Terrain.Validate(); err != nil {
+			return fmt.Errorf("scenario %q: %w", s.Name, err)
+		}
 	}
 	return nil
 }

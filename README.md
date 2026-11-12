@@ -18,6 +18,7 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 | `sim/command` | The LLM loop interface: perception text in, JSON command out; the scripted LLM stand-in with latency and misjudgement |
 | `sim/world` | World files (friction, objectives), random worlds, the tracker that produces the perception |
 | `sim/worlds` | Hand-made worlds |
+| `sim/terrain` | Test-world terrain: octave-noise ground, slopes, ramps, stairs and static objects, with signed-distance contacts and difficulty ladders (see [Test worlds](#test-worlds)) |
 | `sim/env` | Training environment: control timing, randomisation (body, CoG, friction, pushes), command-following reward |
 | `sim/ppo` | PPO with parallel rollouts and gradients, a left–right symmetry loss and a learning rate that follows the KL divergence |
 | `sim/cmd/train` | Trains a scenario and writes `checkpoints/policy.json` every iteration |
@@ -197,6 +198,55 @@ Floors and feet: each episode of a built-in scenario draws a floor with bumps up
 How it learns: inputs are normalised by running statistics stored in the checkpoint. The critic also sees what only the simulator knows: true velocity and height, friction, harness and time left. A symmetry loss (`-symmetry`, default 0.5) asks the policy to command the mirror image of every situation the mirror way, so a skill learned on one side carries to the other. The learning rate rises and falls to keep each update's KL divergence near 0.01. The training log adds `lr` and `sym` columns. `-embed` and `-hidden` size a new network (default 64 and 128). The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
 
 The sim server runs at real time so the view is watchable. Add `-speed 4` to fast-forward, or `-speed 0` to run as fast as one core allows. Add `-push 2` to push the robot sideways every 2 s on average, as in training.
+
+## Test worlds
+
+Worlds for testing walking and, later, stereo vision: stairs, octave-noise ground, slopes, ramps and scattered objects. Each one is a scenario (`walk` on the base body, no pushes, no harness, no random bumps, ends on a fall) whose objective is the far end of the course. Nothing trains on them yet. Watch one with the observer's scenario picker, or start the server on it:
+
+```bash
+cd sim && go run ./cmd/simserver -scenario stairs-up -hold
+```
+
+| World | What it is | Parameters |
+|---|---|---|
+| `stairs-up` | 6 steps up to a landing | ladder `stairs-up` at 0.8: rise 16.8 cm, run 27.6 cm, width 1.6 m, first riser 1 m ahead |
+| `stairs-down` | start on a platform, 6 steps down | ladder `stairs-down` at 0.8: rise 16.8 cm, run 27.6 cm, a 2 m platform whose edge is 0.6 m ahead |
+| `stairs-over` | 4 steps up, a 1.2 m landing, 4 down | ladder `stairs-over` at 0.7: rise 13.8 cm, run 29.8 cm |
+| `slope-10deg` | the whole floor rising 10° ahead | `slope: {angleDeg: 10, headingDeg: 0}` |
+| `ramp` | a 10° ramp up to a landing 40 cm high and down again | `ramps: [{at: [1, 0], angleDeg: 10, rise: 0.4, landing: 1.5}]` |
+| `field-gentle` | slightly uneven ground | noise preset `gentle`: ±2 cm, 3 m wavelength, 3 octaves, persistence 0.4 |
+| `field-rough` | a rough field | noise preset `rough`: ±12 cm, 2 m, 5 octaves, persistence 0.55 |
+| `cluttered-room` | 16 boxes and cylinders to walk between and look at | scatter 15–60 cm wide, 5–90 cm tall, 0.7 m clear of the start and goal |
+| `course` | gentle noise, an 8° ramp, stairs up and over, then clutter | goal 17 m ahead |
+| `scenarios/stairs-sweep.json` | stairs-up at level 0.4 (rise 10.4 cm, run 30.8 cm) | `"terrain": {"level": 0.4}` |
+| `scenarios/stairs-small-robot.json`, `course-small.json` | the same worlds for a smaller robot | `"terrain": {"scale": 0.6}` |
+| `scenarios/slope-15deg-across.json` | a 15° side slope falling to the right | `slope: {angleDeg: 15, headingDeg: 90}` |
+| `scenarios/field-custom.json` | noise with every knob set and a fixed seed | amplitude, wavelength, octaves, persistence, lacunarity |
+| `scenarios/walled-room.json` | an 8 × 6 m room: walls, a table, a pillar and a dozen random objects | explicit `objects` plus `scatter` |
+
+A scenario's `"terrain"` block (Go: `terrain.Spec`) combines any of these; a file that names a built-in in `"base"` merges its terrain over the built-in's:
+
+- `noise` (`amplitude` m peak, `wavelength` m of the coarsest octave, `octaves`, `persistence` 0.3 gentle … 0.7 rough, `lacunarity` default 2), or `noisePreset`: `gentle`, `uneven`, `bumpy`, `rough`, `hillside`; `noiseScale` multiplies the amplitude.
+- `slope` (`angleDeg`, `headingDeg`): a plane through the start.
+- `ramps`: `at`, `headingDeg`, `angleDeg`, `rise`, `landing`, `plateau` (stay up). Ramps run the full width of the floor.
+- `stairs`: `at` (the first riser's foot), `headingDeg`, `rise`, `run`, `steps`, `width`, `landing` (top), `over` (down again on the far side), `down` with `platform` (start on top).
+- `objects`: `kind` (`box` or `cylinder`), `at`, `yawDeg`, `size` [length, height, width], `seed` (appearance).
+- `scatter`: `count`, area `min`/`max`, `size` and `height` ranges, `kinds`, `clear` (kept from the start, every objective and the stairs), `gap`.
+- `seed` fixes the noise and scatter; without one every episode draws a new world. `goal` becomes the objective. `scale` multiplies every length (not angles), for a smaller robot.
+- `ladder` with `level` 0–1 replaces the rest with a world that gets harder as the level rises, for a curriculum: `stairs-up` and `stairs-down` (rise 4→20 cm, run 34→26 cm), `stairs-over` (rise 4→18 cm), `slope` (0→15°), `slope-across` (0→12°), `ramp` (3→15°), `field` (peak 0→12 cm, rougher), `clutter` (4→30 objects, taller). `terrain.Ladder(kind, level)` gives the same in Go.
+
+Headings follow the robot's yaw: 0° is +x (straight ahead at the start), positive turns left.
+
+Every solid is a simple low-poly primitive with a pose, a size and a stable appearance seed, for the stereo renderer: `Terrain.Primitives()` lists stair steps and platforms as boxes and objects as boxes and cylinders, and `Terrain.Field(x, z)` gives the smooth floor's height and slope. The sim server sends both to observers as a one-off `{"terrain": …}` message on the frame socket whenever the terrain changes (a height grid of up to 160 × 160 samples, in mm, plus the primitives); frames carry `terrainRev`. The 3D view draws the solids as shaded boxes and cylinders, the floor grid over the height field and the goal as a post; the 2D views draw the terrain profile through the pelvis and the solids in the top view.
+
+Contacts on a terrain push along the true surface normal: slopes and noise from the exact gradient of the height field; stairs and objects as solids, where a point inside is pushed out through the nearest open face (up through a tread, or straight back out of the riser a toe ran into; faces shared by two steps or buried in the floor are never used). Friction acts in the surface plane. Contact points are points and collider probes are spheres, so on stairs:
+
+- A stair nosing can poke up between the contact points of a foot without being felt; only the heel, midfoot and toe points and the capsule probes touch.
+- Edges are sharp for contact points and rounded by the probe radius for capsules. A point that has sunk deeper into a tread than its distance to the nosing is pushed out through the riser instead of up; sinking is a few millimetres, so this only happens on the last few millimetres of a tread.
+- The stick anchor is kept when a contact slides from a tread onto a riser; the friction cone limits the force it can pull with.
+- A terrain world costs about 55% more per physics step than the plain floor on the mixed course (noise, stairs and 20 objects; `go test ./model -bench Standing`). Scenarios without a terrain run exactly the old floor code.
+
+Standing, falling and the height terms of the reward are measured from the terrain under the pelvis (averaged over a stride, so a step edge does not make them jump); without a terrain that is y = 0, as before.
 
 ## Status
 

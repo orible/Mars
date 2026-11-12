@@ -39,6 +39,7 @@ import (
 	"mars/sim/model"
 	"mars/sim/obs"
 	"mars/sim/policy"
+	"mars/sim/terrain"
 	"mars/sim/world"
 )
 
@@ -130,6 +131,9 @@ type Frame struct {
 	Colliders []ColliderFrame `json:"colliders"`
 	Hits      []HitFrame      `json:"hits"`
 	Floor     []model.Wave    `json:"floor,omitempty"` // floor bumps (flat when empty)
+	// TerrainRev counts terrains built; the terrain itself (TerrainFrame)
+	// goes out as a separate {"terrain": …} message when it changes.
+	TerrainRev int `json:"terrainRev"`
 	// Command loop: what the LLM (or its stand-in) was told and said.
 	Objective *world.XZ       `json:"objective"`
 	Reached   int             `json:"reached"`
@@ -145,6 +149,66 @@ type Frame struct {
 	Training   *env.TrainingStatus `json:"training"`
 	// Human motion reference being tracked (getting up), if any.
 	Reference *RefFrame `json:"reference"`
+}
+
+// TerrainFrame is the test-world terrain, sent once per terrain (and to
+// each client as it connects) as {"terrain": TerrainFrame}. Name is empty
+// for the plain floor. Grid samples the smooth floor (noise, slopes,
+// ramps; not the solids) when it is not flat; Prims are the solids:
+// stair steps, platforms and objects as boxes and cylinders.
+type TerrainFrame struct {
+	Rev   int                 `json:"rev"`
+	Name  string              `json:"name"`
+	Seed  int64               `json:"seed"`
+	Goal  [2]float64          `json:"goal"`
+	Grid  *HeightGrid         `json:"grid,omitempty"`
+	Prims []terrain.Primitive `json:"prims"`
+}
+
+// HeightGrid is the floor height at X0 + i·Step, Z0 + j·Step, stored
+// row by row (j major) in millimetres.
+type HeightGrid struct {
+	X0   float64 `json:"x0"`
+	Z0   float64 `json:"z0"`
+	Step float64 `json:"step"`
+	NX   int     `json:"nx"`
+	NZ   int     `json:"nz"`
+	H    []int32 `json:"h"`
+}
+
+// terrainFrame describes t (nil: the plain floor) for observers.
+func terrainFrame(rev int, name string, t *terrain.Terrain) TerrainFrame {
+	f := TerrainFrame{Rev: rev, Name: name, Prims: []terrain.Primitive{}}
+	if t == nil {
+		return f
+	}
+	f.Seed, f.Goal = t.Seed, t.Spec.Goal
+	f.Prims = append(f.Prims, t.Primitives()...)
+	if !t.HasField() {
+		return f
+	}
+	// Cover the start, the goal and every solid, with room round them.
+	lo, hi := [2]float64{0, 0}, [2]float64{0, 0}
+	grow := func(x, z float64) {
+		lo = [2]float64{math.Min(lo[0], x), math.Min(lo[1], z)}
+		hi = [2]float64{math.Max(hi[0], x), math.Max(hi[1], z)}
+	}
+	grow(f.Goal[0], f.Goal[1])
+	for _, p := range f.Prims {
+		grow(p.Center[0], p.Center[2])
+	}
+	const margin = 4
+	lo[0], lo[1], hi[0], hi[1] = lo[0]-margin, lo[1]-margin, hi[0]+margin, hi[1]+margin
+	step := math.Max(0.1, math.Max(hi[0]-lo[0], hi[1]-lo[1])/160)
+	g := &HeightGrid{X0: lo[0], Z0: lo[1], Step: step, NX: int((hi[0]-lo[0])/step) + 1, NZ: int((hi[1]-lo[1])/step) + 1}
+	for j := 0; j < g.NZ; j++ {
+		for i := 0; i < g.NX; i++ {
+			h, _, _ := t.Field(g.X0+float64(i)*step, g.Z0+float64(j)*step)
+			g.H = append(g.H, int32(math.Round(h*1000)))
+		}
+	}
+	f.Grid = g
+	return f
 }
 
 type RefFrame struct {
@@ -217,6 +281,12 @@ type sim struct {
 	switches <-chan env.Scenario
 	ctl      *control
 	motion   *env.MotionTracker // the scenario's human reference on this body
+	// Terrain: how many have been built, the latest as an observer
+	// message, and whether the robot has finished the course (restart).
+	terrainRev int
+	terrainMsg *atomic.Pointer[[]byte]
+	courseDone bool
+	plainSent  bool // the last terrain published was the plain floor
 }
 
 // control is the scenario state shared with the HTTP endpoints and the
@@ -365,6 +435,9 @@ func (s *sim) control() {
 	// robot to get itself up, and only reset if it is still down after 15 s.
 	if s.fallenAt >= 0 && (s.scen.EndOnFall && w.T-s.fallenAt > 1 || w.T-s.fallenAt > 15) {
 		s.restart()
+	} else if s.courseDone {
+		log.Printf("course %q crossed at t=%.1f s; starting over", s.scen.Name, w.T)
+		s.restart()
 	}
 }
 
@@ -378,6 +451,7 @@ func (s *sim) restart() {
 	s.fallenAt = -1
 	s.up = true
 	s.newWorld(geom.V3{})
+	s.buildTerrain()
 	if s.floating && s.rng.Float64() < s.scen.LyingFrac {
 		env.FloorStart(s.world, s.rng, s.scen.StartLevel)
 		if !s.world.Upright() {
@@ -389,6 +463,55 @@ func (s *sim) restart() {
 	if refs, err := env.LoadReferences(s.scen.Reference); err == nil && len(refs) > 0 {
 		s.motion = env.PickTracker(refs, s.world)
 	}
+}
+
+// buildTerrain puts the scenario's terrain (a fresh one unless its seed is
+// fixed) under the robot, stands it on it, aims the objectives at the
+// course's goal, and publishes it to observers. Scenarios without one
+// keep the plain floor.
+func (s *sim) buildTerrain() {
+	s.courseDone = false
+	var t *terrain.Terrain
+	if s.scen.Terrain != nil {
+		objs, err := env.ApplyTerrain(s.world, *s.scen.Terrain, s.rng.Int63(), s.tracker.W.Objectives)
+		if err != nil {
+			log.Printf("terrain for %q: %v; plain floor instead", s.scen.Name, err)
+		} else {
+			t = s.world.Ground.Terrain
+			wl := s.tracker.W
+			wl.Objectives = objs
+			s.tracker = world.NewTracker(wl)
+			if s.assist > 0 && s.world.Floating {
+				s.world.Harness = model.Harness{Strength: s.assist, Height: s.world.StandHeight() + s.world.GroundUnder(), Target: s.world.Base.P}
+			}
+		}
+	}
+	if t == nil && s.terrainRev > 0 && s.plainSent {
+		return // the plain floor again: observers already have it
+	}
+	s.plainSent = t == nil
+	s.terrainRev++
+	if s.terrainMsg == nil {
+		return
+	}
+	data, err := json.Marshal(struct {
+		Terrain TerrainFrame `json:"terrain"`
+	}{terrainFrame(s.terrainRev, s.terrainName(t), t)})
+	if err != nil {
+		log.Printf("marshal terrain: %v", err)
+		return
+	}
+	s.terrainMsg.Store(&data)
+	if t != nil {
+		log.Printf("terrain %q (seed %d): %d solids, goal %v", s.scen.Name, t.Seed, len(t.Primitives()), t.Spec.Goal)
+	}
+}
+
+func (s *sim) terrainName(t *terrain.Terrain) string {
+	if t == nil {
+		return ""
+	}
+	return s.scen.Name
 }
 
 // newWorld starts the objectives again: the -world file, or a fresh random
@@ -417,7 +540,9 @@ func (s *sim) newWorld(from geom.V3) {
 func (s *sim) command() {
 	w := s.world
 	p := s.tracker.Perceive(w.T, w.Base.P, w.Base.R, !s.up)
-	if p.Objectives == 0 && s.worldCfg == nil {
+	if p.Objectives == 0 && s.scen.Terrain != nil {
+		s.courseDone = true // a terrain course starts over once crossed
+	} else if p.Objectives == 0 && s.worldCfg == nil {
 		s.newWorld(w.Base.P) // random worlds go on forever
 		p = s.tracker.Perceive(w.T, w.Base.P, w.Base.R, !s.up)
 	}
@@ -491,6 +616,7 @@ func (s *sim) frame() Frame {
 		f.Tendons = append(f.Tendons, TendonFrame{Name: tn.Name, Path: m.RoutePoints(w.Pose, t, true)[0], Tension: w.TendonT[t]})
 	}
 	f.Floor = w.Ground.Bumps
+	f.TerrainRev = s.terrainRev
 	for q := range w.Q {
 		l := q + 1
 		j := JointFrame{Name: m.Names[l], Kind: axisKind(m.Axis[l]), Q: w.Q[q], Lo: m.Lo[l], Hi: m.Hi[l], Reach: [2]float64{m.Lo[l], m.Hi[l]}}
@@ -770,6 +896,7 @@ func main() {
 	// latest is the newest frame; latestNet the same frame with the network
 	// view's activations, built only while a client wants them.
 	var latest, latestNet atomic.Pointer[[]byte]
+	var terrainMsg atomic.Pointer[[]byte] // the latest {"terrain": …} message
 	var netClients atomic.Int32
 	polName := "random weights (no -policy)"
 	if *ckpt != "" {
@@ -777,7 +904,7 @@ func main() {
 	}
 	go func() {
 		s := &sim{pol: pol, polName: polName, floating: !*stand, hold: *hold, policies: policies, push: *push, rng: rng, scen: scen,
-			switches: switches, ctl: ctl,
+			switches: switches, ctl: ctl, terrainMsg: &terrainMsg,
 			worldCfg: worldCfg, external: *commander == "external", llm: link, assist: *assist,
 			loop: command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, rng)}
 		for s.world == nil {
@@ -849,12 +976,20 @@ func main() {
 			defer netClients.Add(-1)
 			src = &latestNet
 		}
-		var sent *[]byte
+		var sent, sentTerrain *[]byte
 		for {
 			select {
 			case <-cctx.Done():
 				return
 			case <-tick.C:
+			}
+			// The terrain goes out once per change (the network view
+			// does not draw it).
+			if tm := terrainMsg.Load(); tm != nil && tm != sentTerrain && src == &latest {
+				if err := c.Write(cctx, websocket.MessageText, *tm); err != nil {
+					return
+				}
+				sentTerrain = tm
 			}
 			if d := src.Load(); d != nil && d != sent {
 				if err := c.Write(cctx, websocket.MessageText, *d); err != nil {

@@ -262,7 +262,7 @@ func NewMotionTracker(ref Reference, m *model.Model) *MotionTracker {
 // point on the path (Progress) and the rms angle error to it (Error).
 func (tr *MotionTracker) Update(w *model.World) {
 	lean := TrunkLean(w)
-	h := w.Base.P[1] / w.StandH()
+	h := (w.Base.P[1] - w.GroundUnder()) / w.StandH()
 	var robot [2][3]float64
 	for s, l := range tr.legs {
 		robot[s] = [3]float64{w.Q[l.hip], -w.Q[l.knee], w.Q[l.ankle]}

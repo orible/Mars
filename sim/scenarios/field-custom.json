@@ -1,0 +1,10 @@
+{
+  "base": "field-rough",
+  "name": "field-custom",
+  "description": "octave-noise ground with every knob spelled out, fixed seed so every episode gets the same field",
+  "terrain": {
+    "noisePreset": "",
+    "seed": 1234,
+    "noise": { "amplitude": 0.08, "wavelength": 1.5, "octaves": 6, "persistence": 0.6, "lacunarity": 2.1 }
+  }
+}

@@ -4,9 +4,15 @@
 //
 // World frame: X forward, Y up, Z to the robot's right. The canvas shows a
 // side view (looking at the robot's left side) and a front view.
+//
+// Test-world terrain arrives as a separate {"terrain": …} message: the
+// views draw its profile through the pelvis and the top view its solids.
+
+import { heightAt, footprint, colour } from "./terrain.js";
 
 let socket = null;
 let latest = null;
+let terrain = null; // latest terrain message (null: plain floor)
 let rafId = 0;
 let lastStatus = 0;
 let dotnetRef = null;
@@ -20,7 +26,9 @@ export function connect(url, canvas, dotnet) {
   socket.onclose = () => report("disconnected");
   socket.onerror = () => report("error");
   socket.onmessage = (e) => {
-    latest = JSON.parse(e.data);
+    const m = JSON.parse(e.data);
+    if (m.terrain !== undefined) { terrain = m.terrain && m.terrain.name ? m.terrain : null; return; }
+    latest = m;
     const now = performance.now();
     if (now - lastStatus > 500) {
       lastStatus = now;
@@ -96,11 +104,12 @@ function fitView(f) {
   for (const p of pts) {
     for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], p[k]); max[k] = Math.max(max[k], p[k]); }
   }
-  lo = f.floating ? 0 : min[1];
+  // Floating: from the floor (on a terrain, the ground under the robot) up.
+  lo = f.floating ? (terrain ? Math.min(min[1], heightAt(terrain, f, f.pelvis[0], f.pelvis[2])) - 0.15 : 0) : min[1];
   hi = max[1];
   const wide = Math.max(max[0] - min[0], max[2] - min[2]) + 0.15;
   const s = Math.min(600, (groundY - viewTop) / Math.max(0.3, hi - lo + 0.08), 2 * viewHalfW / Math.max(0.3, wide));
-  const y0 = f.floating ? groundY : viewTop + (hi + 0.04) * s;
+  const y0 = f.floating ? groundY + lo * s : viewTop + (hi + 0.04) * s;
   const mid = [(min[0] + max[0]) / 2, 0, (min[2] + max[2]) / 2];
   if (!fit || f.bodyRev !== fit.rev) fit = { s, y0, mid, rev: f.bodyRev };
   const a = 0.15;
@@ -131,10 +140,35 @@ function draw(canvas, f) {
     // Floor (floating) or the fixed pelvis mount (test stand).
     ctx.strokeStyle = css("--grid");
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(v.cx - 125, y0); ctx.lineTo(v.cx + 125, y0);
-    ctx.stroke();
-    if (floating) {
+    if (floating && terrain) {
+      // The terrain's profile through the pelvis, solid below.
+      ctx.save();
+      ctx.beginPath(); ctx.rect(v.cx - viewHalfW, 0, 2 * viewHalfW, H); ctx.clip();
+      const half = viewHalfW / scale, n = 160, bottom = groundY + 30;
+      const xs = [];
+      ctx.beginPath();
+      for (let k = 0; k <= n; k++) {
+        const a = follow - half + (2 * half * k) / n;
+        const p = v.axis === 0 ? [a, 0, pelvis[2]] : [pelvis[0], 0, a];
+        p[1] = heightAt(terrain, f, p[0], p[2]);
+        const [sx, sy] = at(p);
+        xs.push(sx);
+        k ? ctx.lineTo(sx, Math.min(sy, bottom)) : ctx.moveTo(sx, Math.min(sy, bottom));
+      }
+      ctx.lineTo(xs[n], bottom); ctx.lineTo(xs[0], bottom); ctx.closePath();
+      ctx.fillStyle = css("--muted");
+      ctx.globalAlpha = 0.6;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = css("--muted-text");
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(v.cx - 125, y0); ctx.lineTo(v.cx + 125, y0);
+      ctx.stroke();
+    }
+    if (floating && !terrain) {
       ctx.save();
       ctx.beginPath(); ctx.rect(v.cx - 125, 0, 250, H); ctx.clip();
       const half = viewHalfW / scale;
@@ -195,7 +229,7 @@ function draw(canvas, f) {
     if (floating) {
       ctx.setLineDash([3, 4]);
       ctx.lineWidth = 1;
-      line(ctx, [gx, gy], [gx, y0]);
+      line(ctx, [gx, gy], at([f.cog[0], heightAt(terrain, f, f.cog[0], f.cog[2]), f.cog[2]]));
       ctx.setLineDash([]);
     }
     for (const c of f.contacts || []) {
@@ -232,7 +266,7 @@ function draw(canvas, f) {
     ctx.fillStyle = css("--muted-text");
   }
   ctx.fillText(floating
-    ? `pelvis height ${(pelvis[1] * 100).toFixed(1)} cm · pitch ${deg(f.pitch || 0)}° · roll ${deg(f.roll || 0)}° · falls ${f.falls || 0}`
+    ? `${terrain ? `terrain "${terrain.name}" · ` : ""}pelvis height ${((pelvis[1] - (terrain ? heightAt(terrain, f, pelvis[0], pelvis[2]) : 0)) * 100).toFixed(1)} cm · pitch ${deg(f.pitch || 0)}° · roll ${deg(f.roll || 0)}° · falls ${f.falls || 0}`
     : "test stand (pelvis fixed)", 40, H - 12);
 
   // Right: one row per cylinder — stroke, chamber pressures, valve command.
@@ -298,6 +332,26 @@ function drawTopDown(ctx, f) {
   const p = f.pelvis;
   // Screen: x forward to the right, z (robot's right) downwards.
   const at = (x, z) => [cx + (x - p[0]) * s, cy + (z - p[2]) * s];
+  // Terrain solids, seen from above, and the course goal.
+  if (terrain) {
+    for (const pr of terrain.prims || []) {
+      ctx.beginPath();
+      footprint(pr).forEach(([x, z], i) => { const q = at(x, z); i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]); });
+      ctx.closePath();
+      ctx.fillStyle = colour(pr, pr.role === "object" ? 0.5 : Math.min(1, 0.2 + (pr.center[1] + pr.size[1] / 2) / 1.5));
+      ctx.fill();
+      ctx.strokeStyle = css("--grid");
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    const g = terrain.goal;
+    if (g && (g[0] || g[1])) {
+      const q = at(g[0], g[1]);
+      ctx.strokeStyle = css("--warn");
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(q[0], q[1], 7, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
   const last = trail[trail.length - 1];
   if (!last || Math.hypot(last[0] - p[0], last[1] - p[2]) > 0.05) trail.push([p[0], p[2]]);
   if (last && Math.hypot(last[0] - p[0], last[1] - p[2]) > 2) trail.length = 0; // reset after a restart

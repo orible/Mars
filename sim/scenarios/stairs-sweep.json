@@ -1,0 +1,6 @@
+{
+  "base": "stairs-up",
+  "name": "stairs-sweep",
+  "description": "stairs-up at a chosen difficulty: edit terrain.level (0 = 4 cm rise, 34 cm run … 1 = 20 cm rise, 26 cm run) or make one file per level for a curriculum",
+  "terrain": { "level": 0.4 }
+}

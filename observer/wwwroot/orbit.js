@@ -9,9 +9,16 @@
 // follow the robot again, hover anything for its numbers.
 //
 // World frame: X forward, Y up, Z to the robot's right.
+//
+// Test-world terrain (stairs, slopes, noise ground, objects) arrives as a
+// separate {"terrain": …} message; the floor grid follows its height
+// field and the solids are drawn as shaded boxes and cylinders.
+
+import { fieldHeight, heightAt, faces, colour } from "./terrain.js";
 
 let socket = null;
 let latest = null;
+let terrain = null; // latest terrain message (null: plain floor)
 let rafId = 0;
 let statusEl = null;
 const cam = { yaw: -2.3, pitch: 0.3, dist: 3.4, target: [0, 0.9, 0], follow: true };
@@ -27,7 +34,11 @@ export function connect(url, canvas, status) {
   socket.onopen = () => setStatus("connected");
   socket.onclose = () => setStatus("disconnected");
   socket.onerror = () => setStatus("error");
-  socket.onmessage = (e) => { latest = JSON.parse(e.data); };
+  socket.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.terrain !== undefined) { terrain = m.terrain && m.terrain.name ? m.terrain : null; return; }
+    latest = m;
+  };
   bindInput(canvas);
   const loop = () => {
     if (latest) draw(canvas, latest);
@@ -117,9 +128,7 @@ function heat(t) {
 }
 
 function floorHeight(f, x, z) {
-  let h = 0;
-  for (const w of f.floor || []) h += w.A * Math.cos(w.Kx * x + w.Kz * z + w.Phase);
-  return h;
+  return fieldHeight(terrain, f, x, z);
 }
 
 function draw(canvas, f) {
@@ -167,8 +176,37 @@ function draw(canvas, f) {
     prims.push({ kind: "capsule", pa, pb, z: (pa.z + pb.z) / 2 + r, px, color, info });
   };
 
-  // Floor grid (follows the floor's bumps).
-  const grid = css("--grid"), g0 = 0.25, span = 3;
+  // A filled polygon (a face of a terrain solid), culled when it faces
+  // away from the camera.
+  const face = (pts, n, color, info) => {
+    if (dot3(n, sub(eye, pts[0])) <= 0) return;
+    const pp = pts.map(proj);
+    if (pp.some((q) => !q)) return;
+    prims.push({ kind: "face", pp, z: pp.reduce((a, q) => a + q.z, 0) / pp.length, color, info });
+  };
+
+  // Terrain solids: stair steps, platforms and objects, lit from above
+  // and the front left; and the course's goal as a post.
+  if (terrain) {
+    const light = unit([0.4, 1, -0.5]);
+    for (const p of terrain.prims || []) {
+      const info = {
+        title: p.role === "object" ? `${p.kind} (object)` : p.role,
+        rows: [`${(100 * p.size[0]).toFixed(0)} × ${(100 * (p.center[1] + p.size[1] / 2)).toFixed(0)} cm top × ${(100 * p.size[2]).toFixed(0)} cm`, p.role === "object" ? `appearance seed ${p.seed}` : `top at ${(100 * (p.center[1] + p.size[1] / 2)).toFixed(1)} cm`],
+      };
+      for (const fc of faces(p)) face(fc.pts, fc.n, colour(p, 0.5 + 0.5 * Math.max(0, dot3(unit(fc.n), light))), info);
+    }
+    const g = terrain.goal;
+    if (g && (g[0] || g[1])) {
+      const base = [g[0], heightAt(terrain, f, g[0], g[1]), g[1]];
+      const info = { title: "course goal", rows: [`x ${g[0].toFixed(2)} m, z ${g[1].toFixed(2)} m`] };
+      line(base, add(base, [0, 1.2, 0]), css("--warn"), 3, info);
+      ball(add(base, [0, 1.2, 0]), 5, css("--warn"), info, true);
+    }
+  }
+
+  // Floor grid (follows the floor's bumps and the terrain's height field).
+  const grid = css("--grid"), g0 = 0.25, span = terrain && terrain.grid ? 4 : 3;
   const cx = Math.round(cam.target[0] / g0) * g0, cz = Math.round(cam.target[2] / g0) * g0;
   for (let i = -span / g0; i <= span / g0; i++) {
     for (const along of ["x", "z"]) {
@@ -264,14 +302,27 @@ function draw(canvas, f) {
   // Centre of gravity and its spot on the floor.
   const cogInfo = { title: "centre of gravity", rows: [`${f.mass.toFixed(1)} kg`] };
   ball(f.cog, 6, css("--warn"), cogInfo, true);
-  line(f.cog, [f.cog[0], floorHeight(f, f.cog[0], f.cog[2]), f.cog[2]], css("--warn"), 1, cogInfo, [3, 4]);
+  line(f.cog, [f.cog[0], heightAt(terrain, f, f.cog[0], f.cog[2]), f.cog[2]], css("--warn"), 1, cogInfo, [3, 4]);
 
   prims.sort((a, b) => b.z - a.z);
   let hit = null, best = 9;
   for (const p of prims) {
     const w = (p.width || 1) * Math.min(2.5, 3 / p.z);
     ctx.setLineDash(p.dash || []);
-    if (p.kind === "capsule") {
+    if (p.kind === "face") {
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = 0.92;
+      ctx.beginPath();
+      p.pp.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = text;
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (mouse && p.info && ctx.isPointInPath(mouse[0], mouse[1]) && best >= 7) { best = 7; hit = p.info; }
+    } else if (p.kind === "capsule") {
       ctx.strokeStyle = p.color;
       ctx.globalAlpha = 0.22;
       ctx.lineWidth = Math.max(2, p.px);
@@ -318,6 +369,7 @@ function legend(ctx, f, W, H, text, muted) {
   ctx.font = "12px system-ui, sans-serif";
   ctx.fillStyle = muted;
   const lines = [
+    ...(terrain ? [`terrain "${terrain.name}" (seed ${terrain.seed}): ${(terrain.prims || []).length} solids${terrain.grid ? `, ${terrain.grid.nx}×${terrain.grid.nz} height grid` : ""}`] : []),
     `${f.body} · ${f.links.length} links · ${f.cylinders.length} cylinders · ${(f.tendons || []).length} tendons · ${(f.colliders || []).length} colliders · t ${f.t.toFixed(1)} s`,
     "drag: orbit · right/shift-drag: pan · wheel: zoom · F: follow · C: colliders · hover: details",
   ];

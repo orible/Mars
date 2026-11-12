@@ -1,0 +1,6 @@
+{
+  "base": "slope-10deg",
+  "name": "slope-15deg-across",
+  "description": "walk across a 15° side slope that falls away to the robot's right",
+  "terrain": { "slope": { "angleDeg": 15, "headingDeg": 90 } }
+}

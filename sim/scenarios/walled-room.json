@@ -1,0 +1,17 @@
+{
+  "base": "cluttered-room",
+  "name": "walled-room",
+  "description": "an 8 m by 6 m room with walls, a table-like block and a pillar, and a dozen random boxes and cylinders between them; things to walk round and to look at",
+  "terrain": {
+    "objects": [
+      { "kind": "box", "at": [1.5, -3.05], "size": [9, 1.2, 0.1], "seed": 11 },
+      { "kind": "box", "at": [1.5, 3.05], "size": [9, 1.2, 0.1], "seed": 12 },
+      { "kind": "box", "at": [-2.55, 0], "size": [0.1, 1.2, 6], "seed": 13 },
+      { "kind": "box", "at": [5.55, 0], "size": [0.1, 1.2, 6], "seed": 14 },
+      { "kind": "box", "at": [2.5, 1.8], "yawDeg": 15, "size": [1.2, 0.75, 0.7], "seed": 21 },
+      { "kind": "cylinder", "at": [1, -1.8], "size": [0.35, 2.2, 0.35], "seed": 22 }
+    ],
+    "scatter": { "count": 12, "min": [-2.3, -2.8], "max": [5.3, 2.8], "size": [0.15, 0.5], "height": [0.05, 0.7], "clear": 0.7, "gap": 0.25 },
+    "goal": [4.5, 0]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "base": "course",
+  "name": "course-small",
+  "description": "the mixed course (ramp, stairs over, clutter on gentle noise) at 0.6 scale for a smaller robot",
+  "terrain": { "scale": 0.6 }
+}
