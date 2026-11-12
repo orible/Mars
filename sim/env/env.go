@@ -69,6 +69,17 @@ type Env struct {
 	head    int     // the part highest up in the neutral pose (the sensor head's link)
 	sense   senseNoise
 
+	// Standing balance (see balance.go).
+	anchor  geom.V3 // the spot it is standing on; follows it slowly
+	prevCoG geom.V3 // centre of gravity at the last step
+	support geom.V3 // middle of the loaded foot contacts (last known)
+	cpDist  float64 // horizontal distance from capture point to support
+	prevCP  float64 // cpDist at the last step
+	shock   float64    // peak acceleration over this step, in g, at pelvis or head
+	accelV  [2]geom.V3 // pelvis and head velocity at the last accelerometer sample
+	accelF  [2]geom.V3 // low-passed felt acceleration (a − g), pelvis and head
+	accelOK bool       // accelV holds a sample
+
 	// Motion is the human reference being tracked while getting up (nil
 	// if the scenario has none or the body has no recognisable legs).
 	Motion       *MotionTracker
@@ -135,6 +146,7 @@ func (e *Env) Reset() {
 		e.W.T = 0
 	}
 	e.prevP = e.W.Base.P
+	e.resetBalance()
 	e.up = e.W.Upright()
 	e.Motion = PickTracker(e.refs, e.W)
 	if e.Motion != nil {
@@ -286,8 +298,12 @@ func (e *Env) Step(actions []float64) (r float64, terminal, truncated bool) {
 	e.carry()
 	w.SetActionTargets(actions)
 	e.prevP = w.Base.P
+	e.shock = 0
 	for i := 0; i < PolicyEvery*Substeps; i++ {
 		w.Step(PhysicsDt)
+		if (i+1)%Substeps == 0 {
+			e.sampleShock() // the accelerometers, every control tick (1 ms)
+		}
 	}
 	e.step++
 	if !w.Healthy() {
@@ -318,14 +334,19 @@ func (e *Env) Step(actions []float64) (r float64, terminal, truncated bool) {
 	}
 	e.up = up
 	e.track()
+	e.updateCapture()
 	if up {
 		r = e.upReward(actions)
 	} else {
 		r = e.downReward(actions)
 	}
+	r -= e.impacts()
 	if e.Cfg.PushEvery > 0 && up && e.rng.Float64() < PolicyDt/e.Cfg.PushEvery {
 		a := e.rng.Float64() * 2 * math.Pi
 		s := e.Cfg.PushSpeed[0] + e.rng.Float64()*(e.Cfg.PushSpeed[1]-e.Cfg.PushSpeed[0])
+		if e.Cfg.PushGrow {
+			s *= math.Max(0.15, 1-e.Cfg.Assist)
+		}
 		w.Base.V = w.Base.V.Add(geom.V3{s * math.Cos(a), 0, s * math.Sin(a)})
 	}
 	// Stuck on the floor: no new progress towards standing for a while.
@@ -398,6 +419,7 @@ func (e *Env) downReward(valves []float64) float64 {
 	pot := e.potential()
 	shaping := 2 * (pot - e.prevPot)
 	e.prevPot = pot
+	e.anchor, e.prevCP = e.W.Base.P, e.cpDist // it stands where it rises
 	r := 0.08*pot + 0.04*e.overFeet() + shaping - 0.02*effort(e.W.Cmd)
 	if m := e.Motion; m != nil {
 		close := math.Exp(-m.Error * m.Error / 0.09) // ~17° rms error halves it
@@ -431,12 +453,19 @@ func (e *Env) upReward(valves []float64) float64 {
 	h := e.Cmd.HeadingDeg * math.Pi / 180
 	ef, er := vf-e.Cmd.Speed*math.Cos(h), vr-e.Cmd.Speed*math.Sin(h)
 	track := math.Exp(-(ef*ef + er*er) / 0.04)
+	recover := 0.0
+	if e.Cmd.Speed <= 0.05 {
+		// Standing: stay near your spot rather than never move, so a
+		// quick step to catch a push costs little, and pay for bringing
+		// the capture point back over the feet.
+		track, recover = e.holdSpot()
+	}
 
 	facing := 1.0
 	if e.Cmd.Speed > 0.05 {
 		facing = 0.5 * (1 + math.Cos(h))
 	}
-	return 0.2 + 0.2*upright + 0.5*track + 0.1*facing + 0.5*e.stepping()
+	return 0.2 + 0.2*upright + 0.5*track + 0.1*facing + 0.5*e.stepping() + recover
 }
 
 func effort(valves []float64) float64 {
@@ -463,6 +492,9 @@ func (e *Env) stepping() float64 {
 		}
 		if down && !f.down && moving {
 			r += math.Min(f.air, 0.5) - 0.2 // short shuffles cost, swings up to 0.5 s pay
+		}
+		if down && !f.down && !moving && e.prevCP < shuffleCP {
+			r -= 0.2 // standing: a step it did not need is a shuffle
 		}
 		if down {
 			f.air = 0

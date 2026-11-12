@@ -47,6 +47,12 @@ type Scenario struct {
 	EpisodeSeconds float64    `json:"episodeSeconds"`
 	PushEvery      float64    `json:"pushEvery"` // mean seconds between pushes while up (0 = none)
 	PushSpeed      [2]float64 `json:"pushSpeed"` // m/s range of the sideways velocity change a push gives
+	// PushGrow scales pushes by how far the harness has faded (with a
+	// floor of 15%), so they start gentle enough to ride out in place and
+	// grow until only a recovery step saves it. The trainer brings the
+	// harness back if unheld episodes start falling, which shrinks them
+	// again.
+	PushGrow bool `json:"pushGrow,omitempty"`
 
 	// Assist is the harness strength (0–1) for episodes that start
 	// standing: the pelvis is held up and carried along the command, as a
@@ -92,10 +98,11 @@ var Scenarios = map[string]Scenario{
 		StuckSeconds: 4,
 	},
 	"balance": {
-		Description: "stand still on the stop command, held at first by a fading harness, before any pushes: the balance a baby has before it can stay up after rising",
+		Description: "stand still on the stop command, held at first by a fading harness, with pushes that grow as the harness fades, so it learns to catch itself with a step: the balance a baby has before it can stay up after rising",
 		World:       flatWorld(), EndOnFall: true,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 10, RoughFloor: 0.01,
 		Assist: 1, UnassistedFrac: 0.3,
+		PushEvery: 3, PushSpeed: [2]float64{0.05, 0.5}, PushGrow: true,
 	},
 	"stand": {
 		Description: "stand still on the stop command through random pushes",
