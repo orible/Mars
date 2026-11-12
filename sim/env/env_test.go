@@ -240,6 +240,69 @@ func TestFloorHarnessHelpsButDoesNotLift(t *testing.T) {
 	}
 }
 
+// A get-up counts only once the robot has stayed up for StayUpSeconds; an
+// attempt stuck on the floor ends after StuckSeconds; and in getup the
+// standing starts (balance practice) are never held by the harness.
+func TestGetUpCountingStuckAndStandingStarts(t *testing.T) {
+	sc, _ := LoadScenario("getup")
+	sc.RandomBodyFrac, sc.LyingFrac, sc.StartLevel, sc.PushEvery = 0, 1, 1, 0
+	still := func(e *Env) []float64 { return make([]float64, len(e.W.Cmd)) }
+
+	// Stuck: lying flat with the valves closed makes no progress.
+	e := New(biped(t), sc, 7)
+	e.step, e.stuckFrom = 0, 0
+	ended := -1.0
+	for i := 0; i < int(10/PolicyDt); i++ {
+		if _, terminal, trunc := e.Step(still(e)); terminal || trunc {
+			ended = e.Seconds()
+			break
+		}
+	}
+	t.Logf("stuck attempt ended at %.2f s", ended)
+	if ended < sc.StuckSeconds || ended > sc.StuckSeconds+1 {
+		t.Errorf("a stuck attempt should end after about %.0f s, ended at %.2f s", sc.StuckSeconds, ended)
+	}
+
+	// Counting: put a floor-start episode on its feet; with the valves
+	// closed it stands. The get-up registers at once, the success only
+	// after StayUpSeconds.
+	e = New(biped(t), sc, 8)
+	e.step = 0
+	e.W = model.NewWorld(e.W.M, true)
+	e.W.Harness = model.Harness{}
+	for i := 0; i < int((StayUpSeconds-0.5)/PolicyDt); i++ {
+		e.Step(still(e))
+	}
+	if e.GetUps != 1 || e.StoodUp != 0 {
+		t.Fatalf("after %.1f s up: GetUps %d, StoodUp %d; want 1 and 0", StayUpSeconds-0.5, e.GetUps, e.StoodUp)
+	}
+	for i := 0; i < int(1/PolicyDt); i++ {
+		e.Step(still(e))
+	}
+	if e.StoodUp != 1 {
+		t.Errorf("after %.1f s up: StoodUp %d, want 1", StayUpSeconds+0.5, e.StoodUp)
+	}
+
+	// Standing starts are not held in getup.
+	g, _ := LoadScenario("getup")
+	g.RandomBodyFrac = 0
+	e = New(biped(t), g, 9)
+	standing, heldStanding := 0, 0
+	for i := 0; i < 40; i++ {
+		e.Reset()
+		if !e.StartedLying {
+			standing++
+			if e.Assisted {
+				heldStanding++
+			}
+		}
+	}
+	t.Logf("%d of 40 starts standing, %d of them held", standing, heldStanding)
+	if standing == 0 || heldStanding != 0 {
+		t.Errorf("getup should start some episodes standing and never hold them: %d standing, %d held", standing, heldStanding)
+	}
+}
+
 // Each rung of the floor-start ladder should settle at rest without
 // blowing up; squatting, kneeling, sitting and lying all count as down.
 func TestFloorStartLadder(t *testing.T) {

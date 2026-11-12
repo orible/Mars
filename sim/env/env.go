@@ -50,6 +50,14 @@ type Env struct {
 	StartedLying bool
 	Falls        int // times it went from up to fallen
 	GetUps       int // times it went from down to upright
+	// StoodUp counts get-ups that then stayed up for StayUpSeconds. Only
+	// these count as success: rising and toppling over a second later is
+	// not getting up.
+	StoodUp int
+
+	upSince   float64 // episode time it last came up (−1: down, or already counted)
+	bestPot   float64 // best get-up potential since progress was last made
+	stuckFrom float64 // episode time of that progress
 
 	rng     *rand.Rand
 	step    int
@@ -87,6 +95,7 @@ func New(base body.Body, cfg Scenario, seed int64) *Env {
 	// environments do not all reset in the same iteration.
 	if n := int(cfg.EpisodeSeconds / PolicyDt); n > 1 {
 		e.step = e.rng.Intn(n)
+		e.stuckFrom = e.Seconds()
 	}
 	return e
 }
@@ -116,7 +125,8 @@ func (e *Env) Reset() {
 	e.Loop.Reset(0)
 	e.Cmd = command.Stop
 	e.step = 0
-	e.Falls, e.GetUps = 0, 0
+	e.Falls, e.GetUps, e.StoodUp = 0, 0, 0
+	e.upSince, e.bestPot, e.stuckFrom = -1, 0, 0
 	if e.rng.Float64() < e.Cfg.LyingFrac {
 		FloorStart(e.W, e.rng, e.Cfg.StartLevel)
 		for i := 0; i < int(0.3/PhysicsDt); i++ { // settle at rest, valves closed
@@ -134,7 +144,15 @@ func (e *Env) Reset() {
 	// down count as floor starts for the get-up statistics.
 	e.StartedLying = !e.up
 	e.prevPot = e.potential()
-	e.Assisted = (!e.StartedLying || e.Cfg.AssistFloor) && e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
+	e.bestPot = e.prevPot
+	// With floor assistance (getup), only floor starts are held: standing
+	// starts are there to practise catching balance, which a harness would
+	// do for it.
+	held := !e.StartedLying
+	if e.Cfg.AssistFloor {
+		held = e.StartedLying
+	}
+	e.Assisted = held && e.Cfg.Assist > 0 && e.rng.Float64() >= e.Cfg.UnassistedFrac
 	if e.Assisted {
 		e.W.Harness = model.Harness{Strength: e.Cfg.Assist, Height: e.h0, Target: e.W.Base.P, Gentle: e.StartedLying}
 	}
@@ -286,8 +304,15 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 		}
 	case !e.up && up:
 		e.GetUps++
+		e.upSince = e.Seconds()
 	case e.up && !up && !w.Fallen():
 		up = true // stumbling but not down: still counts as up
+	}
+	if !up {
+		e.upSince = -1
+	} else if e.upSince >= 0 && e.Seconds()-e.upSince >= StayUpSeconds {
+		e.StoodUp++
+		e.upSince = -1 // counted
 	}
 	e.up = up
 	e.track()
@@ -301,8 +326,22 @@ func (e *Env) Step(valves []float64) (r float64, terminal, truncated bool) {
 		s := e.Cfg.PushSpeed[0] + e.rng.Float64()*(e.Cfg.PushSpeed[1]-e.Cfg.PushSpeed[0])
 		w.Base.V = w.Base.V.Add(geom.V3{s * math.Cos(a), 0, s * math.Sin(a)})
 	}
+	// Stuck on the floor: no new progress towards standing for a while.
+	// End the attempt (as a time limit, so its value is bootstrapped) and
+	// start a fresh one rather than flail out the episode.
+	if up {
+		e.bestPot, e.stuckFrom = 0, e.Seconds()
+	} else if pot := e.potential(); pot > e.bestPot+0.02 {
+		e.bestPot, e.stuckFrom = pot, e.Seconds()
+	} else if e.Cfg.StuckSeconds > 0 && e.Seconds()-e.stuckFrom >= e.Cfg.StuckSeconds {
+		return r, false, true
+	}
 	return r, false, float64(e.step)*PolicyDt >= e.Cfg.EpisodeSeconds
 }
+
+// StayUpSeconds is how long a robot has to stay up after rising for the
+// get-up to count.
+const StayUpSeconds = 2.0
 
 // potential measures how far up the robot is, 0..1: almost all pelvis
 // height (as a fraction of standing height), with only a little for the

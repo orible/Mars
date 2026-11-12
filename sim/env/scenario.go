@@ -28,6 +28,10 @@ type Scenario struct {
 
 	LyingFrac float64 `json:"lyingFrac"` // fraction of episodes that start on the floor
 	EndOnFall bool    `json:"endOnFall"` // a fall ends the episode; otherwise it must get back up
+	// StuckSeconds ends an attempt that has been down this long without
+	// getting any closer to standing, so time goes on fresh attempts
+	// rather than flailing (0 = never).
+	StuckSeconds float64 `json:"stuckSeconds,omitempty"`
 	// StartLevel is how far down floor starts go: 0 crouched … 1 lying
 	// flat (see FloorStart). With Curriculum the trainer moves it up as
 	// get-ups succeed and back down if they stop.
@@ -79,9 +83,13 @@ func flatWorld() world.RandomConfig {
 var Scenarios = map[string]Scenario{
 	"getup": {
 		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
-		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: allRises,
+		World:       flatWorld(), LyingFrac: 0.7, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: allRises,
 		Assist: 1, UnassistedFrac: 0.5, AssistFloor: true,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 20, RoughFloor: 0.015,
+		// 30% of episodes start standing, pushed now and then, to practise
+		// catching balance: the skill missing right after it rises.
+		PushEvery: 3, PushSpeed: [2]float64{0.1, 0.3},
+		StuckSeconds: 4,
 	},
 	"stand": {
 		Description: "stand still on the stop command through random pushes",
@@ -205,6 +213,8 @@ func LoadScenario(s string) (Scenario, error) {
 func (s Scenario) Validate() error {
 	in01 := func(v float64) bool { return v >= 0 && v <= 1 }
 	switch {
+	case s.StuckSeconds < 0:
+		return fmt.Errorf("scenario %q: stuckSeconds must not be negative", s.Name)
 	case s.EpisodeSeconds <= 0:
 		return fmt.Errorf("scenario %q: episodeSeconds must be positive", s.Name)
 	case !in01(s.LyingFrac) || !in01(s.RandomBodyFrac) || !in01(s.Assist) || !in01(s.UnassistedFrac) || !in01(s.StartLevel):

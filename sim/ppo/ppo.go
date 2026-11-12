@@ -175,7 +175,7 @@ func (t *Trainer) rollout(i int) ([]sample, []episode) {
 		}
 		if terminal || trunc {
 			eps = append(eps, episode{ret: t.epRet[i], secs: e.Seconds(), fell: e.Falls > 0, assisted: e.Assisted,
-				lying: e.StartedLying, gotUp: e.GetUps > 0})
+				lying: e.StartedLying, gotUp: e.StoodUp > 0}) // got up and stayed up for env.StayUpSeconds
 			t.epRet[i] = 0
 			e.Reset()
 		}
