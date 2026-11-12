@@ -52,9 +52,14 @@ type State struct {
 	Spool float64 `json:"spool"` // -1..1, actual spool position
 }
 
-// NewState places the piston mid-stroke with both chambers at half supply.
+// NewState places the piston mid-stroke at rest: the rod side at half
+// supply and the cap side at the pressure that balances it, so the
+// cylinder pushes neither way (equal pressures on unequal areas would
+// push out with (A_A − A_B)·P/2, hundreds of newtons at full-size
+// pressures).
 func NewState(p Params, s Supply) State {
-	return State{X: p.Stroke / 2, PA: s.Pressure / 2, PB: s.Pressure / 2}
+	pb := s.Pressure / 2
+	return State{X: p.Stroke / 2, PA: pb * p.RodArea / p.BoreArea, PB: pb}
 }
 
 // linearBelow is the pressure difference below which orifice flow is treated

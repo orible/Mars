@@ -140,7 +140,7 @@ try {
 
     Step 'Building simulator tools (sim/bin)'
     New-Item -ItemType Directory -Force (Join-Path $sim 'bin') | Out-Null
-    foreach ($tool in 'simserver', 'train', 'mocapref') {
+    foreach ($tool in 'simserver', 'train', 'mocapref', 'bodygen') {
         # Build beside the old exe and swap it in: Windows cannot overwrite
         # an exe that is running (training or the sim server may be).
         & $go build -o "bin\$tool.new.exe" "./cmd/$tool"

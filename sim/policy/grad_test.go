@@ -30,37 +30,68 @@ func checkGrad(t *testing.T, name string, params, grads [][]float64, loss func()
 	}
 }
 
+func randObs(rng *rand.Rand, n, np, tok, part, glob, priv int) *Obs {
+	o := &Obs{Tokens: randTokens(rng, n, tok), Parts: randTokens(rng, np, part), Global: randTokens(rng, 1, glob)[0]}
+	if priv > 0 {
+		o.Priv = randTokens(rng, 1, priv)[0]
+	}
+	return o
+}
+
+// shake gives the input statistics non-trivial values so the gradient
+// checks also cover normalisation.
+func shake(rng *rand.Rand, zs ...*Normalizer) {
+	for _, z := range zs {
+		for i := range z.Mean {
+			z.Mean[i], z.Var[i] = 0.3*rng.NormFloat64(), 0.5+rng.Float64()
+		}
+		z.Count = 10
+	}
+}
+
 func TestPolicyGradient(t *testing.T) {
 	rng := rand.New(rand.NewSource(4))
-	p := New(rng, 6, 5, 8, 12)
-	tokens, global := randTokens(rng, 4, 6), randTokens(rng, 1, 5)[0]
+	p := New(rng, 6, 4, 5, 8, 12)
+	shake(rng, p.TokNorm, p.PartNorm, p.GloNorm)
+	o := randObs(rng, 4, 3, 6, 4, 5, 0)
 	w := randTokens(rng, 1, 4)[0]
 	loss := func() float64 {
 		s := 0.0
-		for i, m := range p.Forward(tokens, global).Mu {
+		for i, m := range p.Forward(o).Mu {
 			s += w[i] * m
 		}
 		return s
 	}
 	g := p.Clone(true)
-	p.Backward(p.Forward(tokens, global), w, g)
+	p.Backward(p.Forward(o), w, g)
 	checkGrad(t, "policy", p.Params(), g.Params(), loss, rng)
-
-	// Forward must agree with Act.
-	act, mu := p.Act(tokens, global), p.Forward(tokens, global).Mu
-	for i := range act {
-		if math.Abs(act[i]-mu[i]) > 1e-12 {
-			t.Fatalf("Forward %v differs from Act %v", mu, act)
-		}
-	}
 }
 
 func TestValueGradient(t *testing.T) {
 	rng := rand.New(rand.NewSource(5))
-	v := NewValue(rng, 6, 5, 8, 12)
-	tokens, global := randTokens(rng, 3, 6), randTokens(rng, 1, 5)[0]
-	loss := func() float64 { return v.Forward(tokens, global).V }
+	v := NewValue(rng, 6, 4, 5+3, 8, 12)
+	shake(rng, v.TokNorm, v.PartNorm, v.GloNorm)
+	o := randObs(rng, 3, 5, 6, 4, 5, 3)
+	loss := func() float64 { return v.Forward(o).V }
 	g := v.Clone(true)
-	v.Backward(v.Forward(tokens, global), 1, g)
+	v.Backward(v.Forward(o), 1, g)
 	checkGrad(t, "value", v.Params(), g.Params(), loss, rng)
+}
+
+func TestNormalizerMatchesBatchStatistics(t *testing.T) {
+	rng := rand.New(rand.NewSource(6))
+	rows := randTokens(rng, 300, 3)
+	for _, r := range rows {
+		r[0] = 5 + 2*r[0]
+	}
+	z := NewNormalizer(3)
+	z.Update(rows[:120])
+	z.Update(rows[120:])
+	all := NewNormalizer(3)
+	all.Update(rows)
+	for i := range z.Mean {
+		if math.Abs(z.Mean[i]-all.Mean[i]) > 1e-9 || math.Abs(z.Var[i]-all.Var[i]) > 1e-9 {
+			t.Fatalf("feature %d: merged %v/%v, whole batch %v/%v", i, z.Mean[i], z.Var[i], all.Mean[i], all.Var[i])
+		}
+	}
 }

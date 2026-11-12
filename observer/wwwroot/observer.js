@@ -82,9 +82,33 @@ const views = [
   { title: "side (left)", cx: 150, axis: 0, sign: 1 },
   { title: "front", cx: 410, axis: 2, sign: -1 },
 ];
-const standTop = 90, standScale = 520; // test stand: pelvis mount near the top
-const groundY = 520, floorScale = 600; // floating: floor near the bottom
-const newtonsToMetres = 1 / 250; // contact force arrows
+const groundY = 520, viewTop = 40, viewHalfW = 125; // floating: floor near the bottom
+const weightToMetres = 0.6; // force arrows: the body's whole weight draws 0.6 m long
+
+// fitView scales and centres both views on the body's current pose, so a
+// small robot and a full-size one standing or lying down all fit. It is
+// smoothed so the picture does not jump from frame to frame.
+let fit = null;
+function fitView(f) {
+  const pts = f.links.map((l) => l.origin).concat((f.contacts || []).map((c) => c.p));
+  let lo = Infinity, hi = -Infinity;
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts) {
+    for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], p[k]); max[k] = Math.max(max[k], p[k]); }
+  }
+  lo = f.floating ? 0 : min[1];
+  hi = max[1];
+  const wide = Math.max(max[0] - min[0], max[2] - min[2]) + 0.15;
+  const s = Math.min(600, (groundY - viewTop) / Math.max(0.3, hi - lo + 0.08), 2 * viewHalfW / Math.max(0.3, wide));
+  const y0 = f.floating ? groundY : viewTop + (hi + 0.04) * s;
+  const mid = [(min[0] + max[0]) / 2, 0, (min[2] + max[2]) / 2];
+  if (!fit || f.bodyRev !== fit.rev) fit = { s, y0, mid, rev: f.bodyRev };
+  const a = 0.15;
+  fit.s += (s - fit.s) * a;
+  fit.y0 += (y0 - fit.y0) * a;
+  for (const k of [0, 2]) fit.mid[k] += (mid[k] - fit.mid[k]) * a;
+  return fit;
+}
 
 function draw(canvas, f) {
   const ctx = canvas.getContext("2d");
@@ -93,12 +117,13 @@ function draw(canvas, f) {
   ctx.fillRect(0, 0, W, H);
   ctx.font = "12px system-ui, sans-serif";
   const floating = !!f.floating;
-  const scale = floating ? floorScale : standScale;
-  const y0 = floating ? groundY : standTop;
+  const view = fitView(f);
+  const scale = view.s, y0 = view.y0;
   const pelvis = f.pelvis || [0, 0, 0];
+  const newtonsToMetres = weightToMetres / Math.max(1, (f.mass || 1) * 9.81);
 
   for (const v of views) {
-    const follow = floating ? pelvis[v.axis] : 0;
+    const follow = view.mid[v.axis];
     const at = (p) => [v.cx + v.sign * (p[v.axis] - follow) * scale, y0 - p[1] * scale];
     ctx.fillStyle = css("--muted-text");
     ctx.fillText(v.title, v.cx - 110, 24);
@@ -112,12 +137,17 @@ function draw(canvas, f) {
     if (floating) {
       ctx.save();
       ctx.beginPath(); ctx.rect(v.cx - 125, 0, 250, H); ctx.clip();
-      for (let m = Math.floor((follow - 0.3) * 10); m <= Math.ceil((follow + 0.3) * 10); m++) {
+      const half = viewHalfW / scale;
+      for (let m = Math.floor((follow - half) * 10); m <= Math.ceil((follow + half) * 10); m++) {
         const x = v.cx + v.sign * (m / 10 - follow) * scale;
         ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + (m % 10 === 0 ? 14 : 6)); ctx.stroke();
       }
       ctx.restore();
     }
+
+    // Everything on the body stays inside this view's column.
+    ctx.save();
+    ctx.beginPath(); ctx.rect(v.cx - viewHalfW, 0, 2 * viewHalfW, groundY + 30); ctx.clip();
 
     // Bones: parent joint -> child joint; leaf links extend through their CoM.
     const hasChild = new Set(f.links.map((l) => l.parent));
@@ -179,6 +209,7 @@ function draw(canvas, f) {
         line(ctx, p, tip);
       }
     }
+    ctx.restore();
   }
 
   if (floating) drawTopDown(ctx, f);

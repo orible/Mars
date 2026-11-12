@@ -2,6 +2,7 @@ package model
 
 import (
 	"math"
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -89,7 +90,10 @@ func TestFreeFlightConservesMomentum(t *testing.T) {
 	}
 	l1, a1 := momentum(w)
 	t.Logf("linear %v → %v, angular %v → %v, joints %v", l0, l1, a0, a1, w.Q)
-	if d := l1.Sub(l0).Norm(); d > 1e-3*l0.Norm() {
+	// Reusing the factored mass matrix for MassEvery steps and first-order
+	// integration leave a small drift; full-size cylinders swing the arms
+	// hard enough to make it about 0.3% over this flight.
+	if d := l1.Sub(l0).Norm(); d > 5e-3*l0.Norm() {
 		t.Errorf("linear momentum %v → %v", l0, l1)
 	}
 	// First-order integration of fast joint motion leaves a small drift.
@@ -285,5 +289,40 @@ func TestBipedStandsWithValvesClosed(t *testing.T) {
 	}
 	if tilt := math.Acos(math.Min(1, w.Up()[1])); tilt > 0.05 {
 		t.Errorf("pelvis tilted %.3f rad", tilt)
+	}
+}
+
+// The composite-rigid-body mass matrix must match the Newton–Euler one
+// column by column, floating and fixed, in a random pose.
+func TestCRBAMatchesRNEA(t *testing.T) {
+	m := loadBiped(t)
+	w := NewWorld(m, true)
+	rng := rand.New(rand.NewSource(3))
+	for q := range w.Q {
+		w.Q[q] = m.Lo[q+1] + rng.Float64()*(m.Hi[q+1]-m.Lo[q+1])
+	}
+	w.Base.R = geom.AxisAngle(geom.V3{0.3, 1, -0.5}, 0.7)
+	w.Base.P = geom.V3{0.4, 1.1, -0.2}
+	w.refresh()
+	for _, nb := range []int{6, 0} {
+		n := nb + m.NDof()
+		a, b := make([][]float64, n), make([][]float64, n)
+		for i := range a {
+			a[i], b[i] = make([]float64, n), make([]float64, n)
+		}
+		if nb == 6 {
+			m.MassMatrixFloating(w.Pose, a)
+			m.massMatrixFloatingRNEA(w.Pose, b)
+		} else {
+			m.MassMatrix(w.Pose, a)
+			m.massMatrixRNEA(w.Pose, b)
+		}
+		for i := range a {
+			for j := range a[i] {
+				if d := math.Abs(a[i][j] - b[i][j]); d > 1e-9*(1+math.Abs(b[i][j])) {
+					t.Fatalf("nb=%d M[%d][%d]: crba %.9g, rnea %.9g", nb, i, j, a[i][j], b[i][j])
+				}
+			}
+		}
 	}
 }

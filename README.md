@@ -1,6 +1,6 @@
 # Mars: hydraulic biped
 
-Simulation-first stack for a small hydraulic biped. The full plan is in [docs/architecture.md](docs/architecture.md).
+Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 225 lb) with legs, a two-stage spine and arms. The full plan is in [docs/architecture.md](docs/architecture.md).
 
 **Phase 1 goal:** one movement network that walks in the simulator on a body with any number of cylinders, any mounting geometry and any centre of gravity, and keeps working as the body spec is corrected to match real hardware.
 
@@ -9,16 +9,17 @@ Simulation-first stack for a small hydraulic biped. The full plan is in [docs/ar
 | Path | What it is |
 | --- | --- |
 | `sim/geom` | 3D vectors and rotations (X forward, Y up, Z right) |
-| `sim/body` | Body spec: link tree with hinge joints, cylinders pinned between two anchors, supply; validation and random bipeds |
+| `sim/body` | Body spec: link tree with hinge joints, cylinders pinned between two anchors, supply; validation; the human body generator (adult anthropometry, cylinders sized to cover each joint's range) and random humanoids |
+| `sim/cmd/bodygen` | Writes a human body spec for a height and weight and reports each cylinder's bore, stroke and torque across its range |
 | `sim/model` | Kinematics, cylinder length and moment arms per spanned joint, inverse dynamics, the coupled world step, reach report |
 | `sim/hydraulics` | Double-acting cylinder and servo-valve pressure model (also a standalone bench model) |
-| `sim/obs` | Per-cylinder tokens and a global vector; CoG computed from the links |
-| `sim/policy` | Morphology-agnostic set network (shared φ per cylinder → mean pool → shared ρ), value network, backprop, Adam, JSON checkpoints |
+| `sim/obs` | Per-cylinder tokens, per-body-part tokens (the body's sense of its own shape: part length, extent, mass, pose, load on the floor) and a global vector, all scaled to body size; the left–right mirror of an observation |
+| `sim/policy` | Morphology-agnostic set network (body parts → shape context; shared φ per cylinder → mean pool → shared ρ), input normalisation saved with the weights, critic with privileged inputs, backprop, Adam, JSON checkpoints |
 | `sim/command` | The LLM loop interface: perception text in, JSON command out; the scripted LLM stand-in with latency and misjudgement |
 | `sim/world` | World files (friction, objectives), random worlds, the tracker that produces the perception |
 | `sim/worlds` | Hand-made worlds |
 | `sim/env` | Training environment: control timing, randomisation (body, CoG, friction, pushes), command-following reward |
-| `sim/ppo` | PPO with parallel rollouts and parallel gradients |
+| `sim/ppo` | PPO with parallel rollouts and gradients, a left–right symmetry loss and a learning rate that follows the KL divergence |
 | `sim/cmd/train` | Trains a scenario and writes `checkpoints/policy.json` every iteration |
 | `sim/cmd/mocapref` | Turns motion capture (CMU ASF/AMC) into human motion references |
 | `training` | Snapshot of the training data (checkpoints and run logs) that git carries between machines |
@@ -45,6 +46,26 @@ To carry training to another machine, snapshot it into `training/` and commit:
 ```
 
 On the other machine, clone and run setup. It copies the snapshot into `sim/checkpoints` and `sim/runs` when there is no local checkpoint, and `-Restore` (`--restore`) overwrites local data. Then resume with `-resume`. `-Mocap` (`--mocap`) downloads the CMU recordings, which are only needed to re-extract references.
+
+## The body
+
+`sim/bodies/biped.json` is generated from adult male proportions (Drillis & Contini segment lengths, Dempster/Winter masses and radii of gyration) for 1.778 m and 102.06 kg:
+
+- **Legs:** hip yaw, roll and pitch, knee, ankle, with the small biped's cylinder layout scaled up.
+- **Spine:** lumbar pitch and side bend driven by two erector cylinders, plus thoracic twist and pitch. The head is part of the chest.
+- **Arms:** shoulder flexion (40° back to 90° forward), shoulder abduction (10° in to 80° out), and an elbow driven by a "triceps" cylinder (0–115°).
+
+The supply is 210 bar. Each cylinder's stroke covers every combination of its joints' limits, and its bore is sized for a torque at the neutral pose. Regenerate the spec, or try another build, with:
+
+```bash
+cd sim && go run ./cmd/bodygen -out bodies/biped.json
+```
+
+```bash
+cd sim && go run ./cmd/bodygen -height 1.65 -mass 70 -arms=false
+```
+
+The old 0.6 m, 6 kg robot is kept as `bodies/biped-small.json`. Random training bodies are humanoids of 1.55–1.95 m and a BMI of 20–33. Some have no arms, a shorter or rigid spine, no hip yaw or roll, or a second knee cylinder.
 
 ## Run
 
@@ -120,13 +141,16 @@ cd sim && go run ./cmd/simserver -policy checkpoints/walk.json -commander extern
 
 In `walk` and `life`, standing starts may be held by a harness that carries the pelvis along the command while the legs kick and step; it fades as the robot stops falling. Unheld standing starts are logged as "solo", and floor starts as "got up n/m". `simserver -assist 1` shows the held stage.
 
-Continue a run with `-resume`. The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
+Continue a run with `-resume`. Resuming the same scenario picks up its iteration count, start level, harness strength and learning rate from `checkpoints/policy.status.json`; `-start-level` and `-assist` on the command line still override. A checkpoint trained on an older observation layout is refused, and you start a new network instead.
+
+How it learns: inputs are normalised by running statistics stored in the checkpoint. The critic also sees what only the simulator knows: true velocity and height, friction, harness and time left. A symmetry loss (`-symmetry`, default 0.5) asks the policy to command the mirror image of every situation the mirror way, so a skill learned on one side carries to the other. The learning rate rises and falls to keep each update's KL divergence near 0.01. The training log adds `lr` and `sym` columns. `-embed` and `-hidden` size a new network (default 64 and 128). The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
 
 The sim server runs at real time so the view is watchable. Add `-speed 4` to fast-forward, or `-speed 0` to run as fast as one core allows. Add `-push 2` to push the robot sideways every 2 s on average, as in training.
 
 ## Status
 
 - Done: 3D body spec with two-anchor cylinders and ground contact points; joint spans and pose-dependent moment arms (checked against finite differences); floating-base dynamics with stick–slip floor contact, coupled to the hydraulics (tests for energy, momentum, sliding distance and standing); fixed-pelvis test stand; spec validation and reach report; pelvis IMU and yaw-free heading frame in the observations; network that handles any cylinder count; hot reload; observer with floor, contact forces and fall count.
-- Training: PPO written from scratch in Go (gradients checked against finite differences) trains the standing task across random bodies, friction and pushes. The checkpoints are not in git; retrain with `go run ./cmd/train`.
+- Training: PPO written from scratch in Go (gradients checked against finite differences) trains across random humanoids, friction and pushes. The human body needs a new network: the small biped's checkpoints in `training/` use the old observation layout.
+- Physics: the mass matrix uses the composite rigid body algorithm (checked against Newton–Euler). The human body costs about 0.35 s of CPU per simulated second on one core. Floor, joint-stop and cylinder end-stop stiffness grow with body mass.
 - Not modelled: leg self-collision.
 - Next: walk to commanded targets, the Phase 1 exit criterion.

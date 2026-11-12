@@ -254,3 +254,36 @@ func TestRandomBodiesCompile(t *testing.T) {
 		}
 	}
 }
+
+// bodies/biped.json is the 5 ft 10 in, 225 lb human: check the mass, the
+// height to the top of the head standing, the hip height, and that every
+// cylinder reaches its joints' whole range (on random variants too).
+func TestHumanSpec(t *testing.T) {
+	m := loadBiped(t)
+	if mass := m.TotalMass(); math.Abs(mass-102.06) > 0.5 {
+		t.Errorf("mass %.2f kg, want 102.06 (225 lb)", mass)
+	}
+	w := NewWorld(m, true)
+	top := math.Inf(-1)
+	for _, c := range m.Contacts {
+		top = math.Max(top, m.Point(w.Pose, c.Link, c.Point)[1])
+	}
+	if math.Abs(top-1.778) > 0.01 {
+		t.Errorf("standing height %.3f m, want 1.778 (5 ft 10 in)", top)
+	}
+	if hip := w.StandHeight() - 0.08; math.Abs(hip-0.53*1.778) > 0.01 {
+		t.Errorf("hip joint height %.3f m, want about %.3f", hip, 0.53*1.778)
+	}
+	rng := rand.New(rand.NewSource(11))
+	for i := 0; i < 20; i++ {
+		rm, err := New(body.Random(rng))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rm.Reach(24) {
+			if !r.Full() {
+				t.Errorf("random body %d: %s reaches %s only %.2f..%.2f of %.2f..%.2f", i, r.Cylinder, r.Joint, r.Lo, r.Hi, r.LimitLo, r.LimitHi)
+			}
+		}
+	}
+}

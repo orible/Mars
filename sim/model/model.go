@@ -54,6 +54,7 @@ type Model struct {
 
 	om, al, ao, f, n []geom.V3
 	zero, unit, col  []float64
+	comp             []spatialInertia
 }
 
 // Contact is a point on a link that collides with the ground.
@@ -221,7 +222,107 @@ func (m *Model) rnea(ps *Pose, w0, al0, a0 geom.V3, qd, qdd []float64, g geom.V3
 }
 
 // MassMatrixFloating fills M ((6+NDof)×(6+NDof)) for a free pelvis.
-func (m *Model) MassMatrixFloating(ps *Pose, M [][]float64) {
+func (m *Model) MassMatrixFloating(ps *Pose, M [][]float64) { m.crba(ps, M, 6) }
+
+// MassMatrix fills M (NDof×NDof) for pose ps with the pelvis fixed.
+func (m *Model) MassMatrix(ps *Pose, M [][]float64) { m.crba(ps, M, 0) }
+
+// spatialInertia is a rigid body (or a composite of several) about the
+// pelvis origin, in world axes: mass, first moment h = m·c and the
+// rotational inertia J about the pelvis origin.
+type spatialInertia struct {
+	m float64
+	h geom.V3
+	J geom.M3
+}
+
+// apply returns the momentum (linear, and angular about the pelvis origin)
+// of the body moving with angular velocity w while its point at the
+// pelvis origin moves at v.
+func (a *spatialInertia) apply(w, v geom.V3) (geom.V3, geom.V3) {
+	return v.Scale(a.m).Add(w.Cross(a.h)), a.J.MulV(w).Add(a.h.Cross(v))
+}
+
+// crba fills the mass matrix with the composite rigid body algorithm:
+// every entry is one joint's motion dotted with the momentum of the
+// subtree below the other joint, so it costs O(links × depth) instead of
+// one Newton–Euler pass per column. nb is 6 for a free pelvis (rows and
+// columns 0–5 are the pelvis origin's linear and angular motion), else 0.
+func (m *Model) crba(ps *Pose, M [][]float64, nb int) {
+	n := len(m.Names)
+	if len(m.comp) != n {
+		m.comp = make([]spatialInertia, n)
+	}
+	for i := range M {
+		for j := range M[i] {
+			M[i][j] = 0
+		}
+	}
+	p0 := ps.P[0]
+	for i := 0; i < n; i++ {
+		r := ps.P[i].Add(ps.R[i].MulV(m.Com[i])).Sub(p0)
+		R, d, mi := ps.R[i], m.Inertia[i], m.Mass[i]
+		var J geom.M3
+		for a := 0; a < 3; a++ {
+			for b := 0; b < 3; b++ {
+				v := R[a][0]*d[0]*R[b][0] + R[a][1]*d[1]*R[b][1] + R[a][2]*d[2]*R[b][2] - mi*r[a]*r[b]
+				if a == b {
+					v += mi * r.Dot(r)
+				}
+				J[a][b] = v
+			}
+		}
+		m.comp[i] = spatialInertia{mi, r.Scale(mi), J}
+	}
+	for i := n - 1; i >= 1; i-- {
+		c, ch := &m.comp[m.Parent[i]], &m.comp[i]
+		c.m += ch.m
+		c.h = c.h.Add(ch.h)
+		for a := 0; a < 3; a++ {
+			for b := 0; b < 3; b++ {
+				c.J[a][b] += ch.J[a][b]
+			}
+		}
+	}
+	motion := func(i int) (geom.V3, geom.V3) { // joint i's unit motion, as seen at the pelvis origin
+		z := ps.Z[i]
+		return z, ps.P[i].Sub(p0).Cross(z)
+	}
+	for i := 1; i < n; i++ {
+		wi, vi := motion(i)
+		f, mo := m.comp[i].apply(wi, vi)
+		col := nb + i - 1
+		for a := i; a >= 1; a = m.Parent[a] {
+			wa, va := motion(a)
+			x := mo.Dot(wa) + f.Dot(va)
+			M[nb+a-1][col], M[col][nb+a-1] = x, x
+		}
+		if nb == 6 {
+			for k := 0; k < 3; k++ {
+				M[k][col], M[col][k] = f[k], f[k]
+				M[3+k][col], M[col][3+k] = mo[k], mo[k]
+			}
+		}
+	}
+	if nb == 6 {
+		for j := 0; j < 6; j++ {
+			var w, v geom.V3
+			if j < 3 {
+				v[j] = 1
+			} else {
+				w[j-3] = 1
+			}
+			f, mo := m.comp[0].apply(w, v)
+			for k := 0; k < 3; k++ {
+				M[k][j], M[3+k][j] = f[k], mo[k]
+			}
+		}
+	}
+}
+
+// massMatrixFloatingRNEA is MassMatrixFloating by one Newton–Euler pass
+// per column: slow, kept as the reference the tests check crba against.
+func (m *Model) massMatrixFloatingRNEA(ps *Pose, M [][]float64) {
 	nd := m.NDof()
 	for j := 0; j < 6+nd; j++ {
 		var a0, al0 geom.V3
@@ -275,9 +376,8 @@ func (m *Model) AddPointForce(ps *Pose, l int, p, f geom.V3, floating bool, gen 
 	}
 }
 
-// MassMatrix fills M (NDof×NDof) for pose ps, one RNEA call per column.
-// CRBA would be faster; this is simple and exact.
-func (m *Model) MassMatrix(ps *Pose, M [][]float64) {
+// massMatrixRNEA is MassMatrix by one RNEA call per column (test reference).
+func (m *Model) massMatrixRNEA(ps *Pose, M [][]float64) {
 	for j := range m.unit {
 		for i := range m.unit {
 			m.unit[i] = 0
@@ -344,4 +444,13 @@ func cholSolve(A [][]float64, b []float64) {
 		}
 		b[i] = t / A[i][i]
 	}
+}
+
+// TotalMass is the sum of the link masses.
+func (m *Model) TotalMass() float64 {
+	s := 0.0
+	for _, x := range m.Mass {
+		s += x
+	}
+	return s
 }

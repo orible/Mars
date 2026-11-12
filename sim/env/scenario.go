@@ -113,6 +113,8 @@ type TrainingStatus struct {
 	SoloEpisodes int     `json:"soloEpisodes"`
 	SoloFalls    int     `json:"soloFalls"`
 	MeanReturn   float64 `json:"meanReturn"`
+	// LR is the adaptive policy learning rate, restored on -resume.
+	LR float64 `json:"lr,omitempty"`
 }
 
 // StatusPath is where the trainer writing checkpoint ckpt reports its

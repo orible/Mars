@@ -3,6 +3,18 @@
 // with one shared, learned noise level, so a sample's log-probability is a
 // sum over however many cylinders that body has. Rollouts run one
 // environment per goroutine; gradients are split across workers.
+//
+// Beyond plain PPO:
+//   - inputs are normalised by running statistics, warmed up before the
+//     first update and refreshed after every update;
+//   - the critic sees privileged facts (true velocity, height, friction,
+//     harness, time left) that the policy does not, so its advantages are
+//     sharper without the policy leaning on them;
+//   - a symmetry loss asks the policy to command the mirror image of the
+//     body the way it commands the body, so whatever it learns on one side
+//     it knows on the other;
+//   - the learning rate follows the measured KL divergence, larger while
+//     updates are timid and smaller when they overshoot.
 package ppo
 
 import (
@@ -13,6 +25,7 @@ import (
 	"time"
 
 	"mars/sim/env"
+	"mars/sim/obs"
 	"mars/sim/policy"
 )
 
@@ -27,9 +40,17 @@ type Config struct {
 	Minibatch int
 	Entropy   float64 // entropy bonus per actuator
 	TargetKL  float64 // stop the epoch loop early above this
+	DesiredKL float64 // adapt the policy learning rate towards this KL per update (0 = fixed rate)
+	MinLR     float64
+	MaxLR     float64
+	Symmetry  float64 // weight of the mirror-symmetry loss (0 = off)
 	MaxGrad   float64 // gradient norm clip
 	Workers   int
 }
+
+// symEvery: the symmetry loss runs on one sample in this many (it costs a
+// second forward and backward pass).
+const symEvery = 4
 
 // MinLogStd is the floor on the exploration noise (σ = 0.2 of full valve
 // opening): below it, training stops trying new things before the hard
@@ -38,12 +59,12 @@ var MinLogStd = math.Log(0.2)
 
 func Defaults() Config {
 	return Config{Envs: 24, Steps: 256, Gamma: 0.99, Lambda: 0.95, Clip: 0.2, LR: 3e-4, VLR: 1e-3,
-		Epochs: 5, Minibatch: 512, Entropy: 0, TargetKL: 0.02, MaxGrad: 1, Workers: runtime.GOMAXPROCS(0)}
+		Epochs: 5, Minibatch: 512, Entropy: 0, TargetKL: 0.03, DesiredKL: 0.01, MinLR: 1e-5, MaxLR: 1e-3,
+		Symmetry: 0.5, MaxGrad: 1, Workers: runtime.GOMAXPROCS(0)}
 }
 
 type sample struct {
-	tokens [][]float64
-	global []float64
+	o      *policy.Obs
 	act    []float64
 	logp   float64
 	value  float64
@@ -69,6 +90,8 @@ type Stats struct {
 	Std                     float64
 	KL, ClipFrac            float64
 	ValueLoss               float64
+	SymLoss                 float64 // mean squared command difference to the mirror image
+	LR                      float64 // policy learning rate after this update
 	Epochs                  int
 	RolloutSec, TrainSec    float64
 }
@@ -138,18 +161,17 @@ func (t *Trainer) rollout(i int) ([]sample, []episode) {
 	done := make([]bool, 0, cfg.Steps)
 	var eps []episode
 	for s := 0; s < cfg.Steps; s++ {
-		tok, g := e.Observe()
-		mu := t.Pol.Forward(tok, g).Mu
+		o := e.Observe()
+		mu := t.Pol.Forward(o).Mu
 		act := make([]float64, len(mu))
 		for k := range mu {
 			act[k] = mu[k] + std*rng.NormFloat64()
 		}
-		sm := sample{tokens: tok, global: g, act: act, logp: logProb(act, mu, t.Pol.LogStd[0]), value: t.Val.Forward(tok, g).V}
+		sm := sample{o: o, act: act, logp: logProb(act, mu, t.Pol.LogStd[0]), value: t.Val.Forward(o).V}
 		r, terminal, trunc := e.Step(act)
 		t.epRet[i] += r
 		if trunc && !terminal {
-			nt, ng := e.Observe()
-			r += cfg.Gamma * t.Val.Forward(nt, ng).V
+			r += cfg.Gamma * t.Val.Forward(e.Observe()).V
 		}
 		if terminal || trunc {
 			eps = append(eps, episode{ret: t.epRet[i], secs: e.Seconds(), fell: e.Falls > 0, assisted: e.Assisted,
@@ -161,8 +183,7 @@ func (t *Trainer) rollout(i int) ([]sample, []episode) {
 		rew = append(rew, r)
 		done = append(done, terminal || trunc)
 	}
-	tok, g := e.Observe()
-	next := t.Val.Forward(tok, g).V
+	next := t.Val.Forward(e.Observe()).V
 	adv := 0.0
 	for s := len(out) - 1; s >= 0; s-- {
 		if done[s] {
@@ -177,8 +198,39 @@ func (t *Trainer) rollout(i int) ([]sample, []episode) {
 	return out, eps
 }
 
+// warmup fills empty input statistics from a short run of every
+// environment, so the very first update already sees normalised inputs.
+func (t *Trainer) warmup() {
+	parts := make([][]*policy.Obs, len(t.envs))
+	var wg sync.WaitGroup
+	for i := range t.envs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			e := t.envs[i]
+			for s := 0; s < 64; s++ {
+				o := e.Observe()
+				parts[i] = append(parts[i], o)
+				if _, terminal, trunc := e.Step(t.Pol.Forward(o).Mu); terminal || trunc {
+					e.Reset()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	var all []*policy.Obs
+	for _, p := range parts {
+		all = append(all, p...)
+	}
+	t.Pol.UpdateNorms(all)
+	t.Val.UpdateNorms(all)
+}
+
 // Iterate collects one batch of experience and updates both networks.
 func (t *Trainer) Iterate() Stats {
+	if t.Pol.TokNorm.Count == 0 {
+		t.warmup()
+	}
 	t.Iter++
 	st := Stats{Iter: t.Iter}
 	t0 := time.Now()
@@ -249,8 +301,25 @@ func (t *Trainer) Iterate() Stats {
 	}
 
 	t1 := time.Now()
-	st.KL, st.ClipFrac, st.ValueLoss, st.Epochs = t.update(batch)
+	st.KL, st.ClipFrac, st.ValueLoss, st.SymLoss, st.Epochs = t.update(batch)
 	st.Std = t.Pol.Std()
+	// Refresh the input statistics for the next rollout (after the update,
+	// so this batch's log-probabilities stay exact while it trains).
+	all := make([]*policy.Obs, len(batch))
+	for i := range batch {
+		all[i] = batch[i].o
+	}
+	t.Pol.UpdateNorms(all)
+	t.Val.UpdateNorms(all)
+	if c := t.Cfg; c.DesiredKL > 0 {
+		switch {
+		case st.KL > 2*c.DesiredKL:
+			t.popt.LR = math.Max(c.MinLR, t.popt.LR/1.5)
+		case st.KL < c.DesiredKL/2:
+			t.popt.LR = math.Min(c.MaxLR, t.popt.LR*1.5)
+		}
+	}
+	st.LR = t.popt.LR
 	st.TrainSec = time.Since(t1).Seconds()
 	return st
 }
@@ -259,10 +328,14 @@ type workerOut struct {
 	gp          *policy.SetPolicy
 	gv          *policy.SetValue
 	kl, clipped float64
-	vloss       float64
+	vloss, sym  float64
 }
 
-func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs int) {
+// LR is the policy learning rate in use; SetLR changes it (to resume).
+func (t *Trainer) LR() float64      { return t.popt.LR }
+func (t *Trainer) SetLR(lr float64) { t.popt.LR = lr }
+
+func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss, symLoss float64, epochs int) {
 	cfg := t.Cfg
 	W := max(1, cfg.Workers)
 	outs := make([]workerOut, W)
@@ -274,7 +347,7 @@ func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs in
 	for ep := 0; ep < cfg.Epochs; ep++ {
 		epochs = ep + 1
 		rand.Shuffle(len(idx), func(i, j int) { idx[i], idx[j] = idx[j], idx[i] })
-		var epKL, epClip, epV float64
+		var epKL, epClip, epV, epSym float64
 		for start := 0; start < len(idx); start += cfg.Minibatch {
 			mb := idx[start:min(start+cfg.Minibatch, len(idx))]
 			B := float64(len(mb))
@@ -288,10 +361,10 @@ func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs in
 					o := &outs[w]
 					policy.Zero(o.gp.Params())
 					policy.Zero(o.gv.Params())
-					o.kl, o.clipped, o.vloss = 0, 0, 0
+					o.kl, o.clipped, o.vloss, o.sym = 0, 0, 0, 0
 					for k := w; k < len(mb); k += W {
 						s := &batch[mb[k]]
-						c := t.Pol.Forward(s.tokens, s.global)
+						c := t.Pol.Forward(s.o)
 						lp := logProb(s.act, c.Mu, logStd)
 						ratio := math.Exp(lp - s.logp)
 						o.kl += (ratio - 1) - (lp - s.logp)
@@ -312,7 +385,21 @@ func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs in
 							t.Pol.Backward(c, dMu, o.gp)
 						}
 						o.gp.LogStd[0] += dlogStd
-						vc := t.Val.Forward(s.tokens, s.global)
+						if cfg.Symmetry > 0 && mb[k]%symEvery == 0 {
+							// Pull the mirror image's commands towards this
+							// state's (held fixed): each token is its twin's
+							// mirror, so a symmetric policy matches exactly.
+							// Every symEvery-th sample, weighted up to match.
+							cm := t.Pol.Forward(obs.Mirror(s.o))
+							d := make([]float64, len(cm.Mu))
+							for i := range d {
+								diff := cm.Mu[i] - c.Mu[i]
+								o.sym += symEvery * diff * diff / n
+								d[i] = symEvery * cfg.Symmetry * 2 * diff / n / B
+							}
+							t.Pol.Backward(cm, d, o.gp)
+						}
+						vc := t.Val.Forward(s.o)
 						diff := vc.V - s.ret
 						o.vloss += 0.5 * diff * diff
 						t.Val.Backward(vc, diff/B/policy.ValueScale, o.gv)
@@ -328,6 +415,7 @@ func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs in
 				epKL += outs[w].kl
 				epClip += outs[w].clipped
 				epV += outs[w].vloss
+				epSym += outs[w].sym
 			}
 			t.popt.Step(t.Pol.Params(), gp.Params(), cfg.MaxGrad)
 			t.vopt.Step(t.Val.Params(), gv.Params(), cfg.MaxGrad)
@@ -335,10 +423,10 @@ func (t *Trainer) update(batch []sample) (kl, clipFrac, vloss float64, epochs in
 			t.Pol.LogStd[0] = math.Max(MinLogStd, math.Min(0, t.Pol.LogStd[0]))
 		}
 		n := float64(len(batch))
-		kl, clipFrac, vloss = epKL/n, epClip/n, epV/n
+		kl, clipFrac, vloss, symLoss = epKL/n, epClip/n, epV/n, epSym/n
 		if cfg.TargetKL > 0 && kl > cfg.TargetKL {
 			break
 		}
 	}
-	return kl, clipFrac, vloss, epochs
+	return kl, clipFrac, vloss, symLoss, epochs
 }

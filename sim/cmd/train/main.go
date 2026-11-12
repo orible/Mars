@@ -51,7 +51,7 @@ func writeJSON(path string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-const csvHeader = "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level,held_floor,held_got_up"
+const csvHeader = "iter,samples,episodes,falls,mean_return,mean_seconds,std,kl,clip_frac,value_loss,epochs,rollout_s,train_s,assist,solo_episodes,solo_falls,solo_seconds,assisted_falls,lying_episodes,got_up,start_level,held_floor,held_got_up,sym_loss,lr"
 
 // scenarioFile returns the scenario argument if it is a file, made
 // absolute so another process can load it.
@@ -88,6 +88,9 @@ func main() {
 	flag.Float64Var(&cfg.LR, "lr", cfg.LR, "policy learning rate")
 	startLevel := flag.Float64("start-level", -1, "how far down floor starts go, 0 crouched … 1 lying flat (default: the scenario's); moved automatically in curriculum scenarios")
 	assist := flag.Float64("assist", -1, "starting harness strength 0–1 (walk default 1, stand default 0); faded automatically as assisted falls drop")
+	embed := flag.Int("embed", 64, "embedding width of a new network")
+	hidden := flag.Int("hidden", 128, "hidden layer width of a new network")
+	flag.Float64Var(&cfg.Symmetry, "symmetry", cfg.Symmetry, "weight of the left–right symmetry loss (0 = off)")
 	flag.Parse()
 
 	base, err := body.Load(*bodyPath)
@@ -95,24 +98,33 @@ func main() {
 		log.Fatal(err)
 	}
 	rng := rand.New(rand.NewSource(*seed))
-	pol := policy.New(rng, obs.TokenDim, obs.GlobalDim, 32, 64)
-	val := policy.NewValue(rng, obs.TokenDim, obs.GlobalDim, 32, 64)
+	pol := policy.New(rng, obs.TokenDim, obs.PartDim, obs.GlobalDim, *embed, *hidden)
+	pol.ObsVersion = obs.Version
+	val := policy.NewValue(rng, obs.TokenDim, obs.PartDim, obs.GlobalDim+env.PrivDim, *embed, *hidden)
 	valPath := filepath.Join(filepath.Dir(*out), "value-"+filepath.Base(*out))
 	if *resume {
+		pol = &policy.SetPolicy{}
 		if err := readJSON(*out, pol); err != nil {
 			log.Fatal(err)
 		}
+		if err := pol.Check(); err != nil {
+			log.Fatalf("%s: %v", *out, err)
+		}
+		if pol.ObsVersion != obs.Version {
+			log.Fatalf("%s was trained on observation layout %d, the simulator now provides layout %d; train a new network (drop -resume)", *out, pol.ObsVersion, obs.Version)
+		}
+		val = &policy.SetValue{}
 		if err := readJSON(valPath, val); err != nil {
 			log.Fatal(err)
 		}
-		if len(pol.LogStd) != 1 {
-			pol.LogStd = []float64{policy.DefaultLogStd}
+		if val.GlobalDim != obs.GlobalDim+env.PrivDim || val.PartDim != obs.PartDim {
+			log.Fatalf("%s does not match the critic's inputs; train a new network (drop -resume)", valPath)
 		}
 		pol.LogStd[0] = math.Max(ppo.MinLogStd, pol.LogStd[0]) // restore exploration if it had collapsed
 		log.Printf("resumed from %s (exploration σ %.2f)", *out, pol.Std())
 	}
-	if pol.TokenDim != obs.TokenDim || pol.GlobalDim != obs.GlobalDim {
-		log.Fatalf("checkpoint features %d/%d, simulator provides %d/%d", pol.TokenDim, pol.GlobalDim, obs.TokenDim, obs.GlobalDim)
+	if pol.TokenDim != obs.TokenDim || pol.PartDim != obs.PartDim || pol.GlobalDim != obs.GlobalDim {
+		log.Fatalf("checkpoint features %d/%d/%d, simulator provides %d/%d/%d", pol.TokenDim, pol.PartDim, pol.GlobalDim, obs.TokenDim, obs.PartDim, obs.GlobalDim)
 	}
 
 	ecfg, err := env.LoadScenario(*scenarioArg)
@@ -134,11 +146,34 @@ func main() {
 	}
 	level := ecfg.Assist
 	floorLevel := ecfg.StartLevel
+	// Resuming the same scenario carries on where it stopped: the
+	// curriculum's start level and harness strength, the iteration count
+	// and the learning rate (flags given on the command line still win).
+	var prev env.TrainingStatus
+	resumed := *resume && readJSON(env.StatusPath(*out), &prev) == nil && prev.Scenario == ecfg.Name
+	if resumed {
+		set := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+		if !set["start-level"] {
+			floorLevel = prev.StartLevel
+		}
+		if !set["assist"] {
+			level = prev.Assist
+		}
+		ecfg.StartLevel, ecfg.Assist = floorLevel, level
+		log.Printf("resuming %q at iteration %d: start level %.2f, assist %.2f", ecfg.Name, prev.Iter, floorLevel, level)
+	}
 	envs := make([]*env.Env, cfg.Envs)
 	for i := range envs {
 		envs[i] = env.New(base, ecfg, *seed*1000+int64(i))
 	}
 	tr := ppo.New(cfg, pol, val, envs, *seed)
+	if resumed {
+		tr.Iter = prev.Iter
+		if prev.LR > 0 {
+			tr.SetLR(prev.LR)
+		}
+	}
 
 	if err := os.MkdirAll(filepath.Dir(*logPath), 0o755); err != nil {
 		log.Fatal(err)
@@ -166,15 +201,15 @@ func main() {
 	var heldEps, heldFalls, downEps, upEps, hfEps, hfUp []int
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
-		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d,%.3f,%d,%d\n",
+		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d,%.3f,%d,%d,%.5f,%.2e\n",
 			s.Iter, s.Samples, s.Episodes, s.Falls, s.MeanReturn, s.MeanSecs, s.Std, s.KL, s.ClipFrac, s.ValueLoss, s.Epochs, s.RolloutSec, s.TrainSec,
-			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp, floorLevel, s.HeldFloor, s.HeldGotUp)
+			level, s.SoloEpisodes, s.SoloFalls, s.SoloSecs, s.AssistedFalls, s.LyingEpisodes, s.GotUp, floorLevel, s.HeldFloor, s.HeldGotUp, s.SymLoss, s.LR)
 		fallRate := 0.0
 		if s.Episodes > 0 {
 			fallRate = float64(s.Falls) / float64(s.Episodes)
 		}
-		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d (level %.2f), held %d/%d  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
-			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, floorLevel, s.HeldGotUp, s.HeldFloor, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.ValueLoss, s.RolloutSec, s.TrainSec,
+		log.Printf("iter %4d  eps %3d  fell %3.0f%%  return %7.2f  floor-starts got up %d/%d (level %.2f), held %d/%d  assist %.2f  solo %d/%d fell  σ %.3f  kl %.4f  lr %.1e  sym %.4f  vloss %6.2f  %.1f+%.1f s  (%s)",
+			s.Iter, s.Episodes, 100*fallRate, s.MeanReturn, s.GotUp, s.LyingEpisodes, floorLevel, s.HeldGotUp, s.HeldFloor, level, s.SoloFalls, s.SoloEpisodes, s.Std, s.KL, s.LR, s.SymLoss, s.ValueLoss, s.RolloutSec, s.TrainSec,
 			time.Since(start).Round(time.Second))
 
 		// Reverse curriculum for getting up: start lower once it gets up
@@ -253,7 +288,7 @@ func main() {
 			StartLevel: floorLevel, Assist: level,
 			Episodes: s.Episodes, Falls: s.Falls, FloorStarts: s.LyingEpisodes, GotUp: s.GotUp,
 			HeldFloor: s.HeldFloor, HeldGotUp: s.HeldGotUp,
-			SoloEpisodes: s.SoloEpisodes, SoloFalls: s.SoloFalls, MeanReturn: s.MeanReturn,
+			SoloEpisodes: s.SoloEpisodes, SoloFalls: s.SoloFalls, MeanReturn: s.MeanReturn, LR: s.LR,
 		}); err != nil {
 			log.Fatal(err)
 		}

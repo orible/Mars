@@ -50,8 +50,7 @@ func main() {
 		start, best, firstUp := w.Base.P[1]/h0, 0.0, -1.0
 		trace := ""
 		for s := 0; float64(s)*env.PolicyDt < *secs; s++ {
-			tok, g := e.Observe()
-			e.Step(pol.Act(tok, g))
+			e.Step(pol.Act(e.Observe()))
 			h := w.Base.P[1] / h0
 			best = math.Max(best, h)
 			if firstUp < 0 && w.Upright() {

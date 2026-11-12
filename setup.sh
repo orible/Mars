@@ -107,7 +107,7 @@ ok "downloaded"
 
 step "Building simulator tools (sim/bin)"
 mkdir -p bin
-for tool in simserver train mocapref; do
+for tool in simserver train mocapref bodygen; do
   go build -o "bin/$tool" "./cmd/$tool"
   ok "bin/$tool"
 done

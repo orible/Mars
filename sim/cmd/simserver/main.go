@@ -292,8 +292,7 @@ func (s *sim) control() {
 	}
 	if !s.hold && s.tick%env.PolicyEvery == 0 {
 		s.command()
-		tokens, global := obs.Build(w, obs.ReadIMU(w), s.cmd)
-		copy(w.Cmd, s.pol.Act(tokens, global))
+		copy(w.Cmd, s.pol.Act(obs.Build(w, obs.ReadIMU(w), s.cmd)))
 	}
 	s.tick++
 	if s.push > 0 && w.Floating && s.up && s.rng.Float64() < controlDt/s.push {
@@ -513,8 +512,8 @@ func loadPolicy(path string) (*policy.SetPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if p.TokenDim != obs.TokenDim || p.GlobalDim != obs.GlobalDim {
-		return nil, fmt.Errorf("%s: checkpoint features %d/%d, simulator provides %d/%d", path, p.TokenDim, p.GlobalDim, obs.TokenDim, obs.GlobalDim)
+	if p.ObsVersion != obs.Version || p.TokenDim != obs.TokenDim || p.PartDim != obs.PartDim || p.GlobalDim != obs.GlobalDim {
+		return nil, fmt.Errorf("%s: checkpoint uses observation layout %d, the simulator provides layout %d", path, p.ObsVersion, obs.Version)
 	}
 	return p, nil
 }
@@ -597,7 +596,8 @@ func main() {
 	}
 
 	rng := rand.New(rand.NewSource(*seed))
-	pol := policy.New(rng, obs.TokenDim, obs.GlobalDim, 32, 64)
+	pol := policy.New(rng, obs.TokenDim, obs.PartDim, obs.GlobalDim, 64, 128)
+	pol.ObsVersion = obs.Version
 	ctx := context.Background()
 	policies := make(chan *policy.SetPolicy, 1)
 	if *ckpt != "" {

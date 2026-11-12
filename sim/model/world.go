@@ -19,6 +19,9 @@ const (
 	// and standing needs no cylinder force at the knee.
 	limitK = 2000 // N·m/rad
 	limitC = 10   // N·m·s/rad
+	// limitScale stiffens joint stops further on full-size bodies, whose
+	// cylinders push far harder for their mass than the small robot's.
+	limitScale = 4
 )
 
 // Ground is a flat floor at y = 0. Each contact point is a compliant
@@ -36,6 +39,18 @@ type Ground struct {
 // DefaultGround is a firm, grippy floor: about 1 mm of sink per foot
 // corner under a 6 kg robot.
 func DefaultGround() Ground { return Ground{K: 3e4, C: 200, Kt: 2e4, Ct: 100, Mu: 0.8} }
+
+// stiffScale grows floor, joint-stop and end-stop stiffness with the body
+// so a full-size robot sinks and overshoots about as little as the small
+// one: 1 up to 10 kg, then proportional to mass.
+func stiffScale(mass float64) float64 { return math.Max(1, mass/10) }
+
+// GroundFor is DefaultGround stiffened for a body of the given mass.
+func GroundFor(mass float64) Ground {
+	g, s := DefaultGround(), stiffScale(mass)
+	g.K, g.C, g.Kt, g.Ct = g.K*s, g.C*s, g.Kt*s, g.Ct*s
+	return g
+}
 
 // Base is the floating pelvis state.
 type Base struct {
@@ -85,6 +100,7 @@ type World struct {
 	MassEvery int
 
 	standH  float64
+	stiff   float64 // stiffScale for this body
 	massAge int
 	anchor  []geom.V3 // stick point of each touching contact
 	touch   []bool
@@ -106,7 +122,7 @@ func NewWorld(m *Model, floating bool) *World {
 		nb = 6
 	}
 	w := &World{
-		M: m, Floating: floating, Ground: DefaultGround(), MassEvery: 5,
+		M: m, Floating: floating, Ground: GroundFor(m.TotalMass()), MassEvery: 5, stiff: stiffScale(m.TotalMass()),
 		Base: Base{R: geom.Identity()},
 		Q:    make([]float64, n), Qd: make([]float64, n),
 		Cyl: make([]hydraulics.State, len(m.Cyl)), Cmd: make([]float64, len(m.Cyl)),
@@ -183,6 +199,10 @@ func (w *World) StandHeight() float64 {
 	return -lo
 }
 
+// Refresh recomputes the pose and cylinder lengths after Q or Base were
+// set directly.
+func (w *World) Refresh() { w.refresh() }
+
 func (w *World) refresh() {
 	w.M.FKBase(w.Base.R, w.Base.P, w.Q, w.Pose)
 	for k := range w.M.Cyl {
@@ -241,9 +261,9 @@ func (w *World) Step(dt float64) {
 		hydraulics.StepPressures(c.P, m.Supply, &w.Cyl[k], w.Cmd[k], math.Max(0, math.Min(c.P.Stroke, x)), v, dt)
 		f := hydraulics.Force(c.P, w.Cyl[k]) - c.P.Viscous*v
 		if x < 0 {
-			f += endStopK*(-x) - endStopC*v
+			f += w.stiff * (endStopK*(-x) - endStopC*v)
 		} else if x > c.P.Stroke {
-			f -= endStopK*(x-c.P.Stroke) + endStopC*v
+			f -= w.stiff * (endStopK*(x-c.P.Stroke) + endStopC*v)
 		}
 		for i, q := range c.Span {
 			w.gen[nb+q] += f * w.DLdq[k][i]
@@ -253,9 +273,9 @@ func (w *World) Step(dt float64) {
 		l := q + 1
 		w.gen[nb+q] -= m.Damping[l] * w.Qd[q]
 		if w.Q[q] < m.Lo[l] {
-			w.gen[nb+q] += limitK*(m.Lo[l]-w.Q[q]) - limitC*w.Qd[q]
+			w.gen[nb+q] += w.stiff * limitScale * (limitK*(m.Lo[l]-w.Q[q]) - limitC*w.Qd[q])
 		} else if w.Q[q] > m.Hi[l] {
-			w.gen[nb+q] += limitK*(m.Hi[l]-w.Q[q]) - limitC*w.Qd[q]
+			w.gen[nb+q] += w.stiff * limitScale * (limitK*(m.Hi[l]-w.Q[q]) - limitC*w.Qd[q])
 		}
 	}
 	refactor := w.massAge <= 0

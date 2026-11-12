@@ -1,14 +1,23 @@
 // Package policy holds the morphology-agnostic movement network.
 //
-// Each actuator is a token. A shared encoder φ embeds every token together
-// with the global observation; embeddings are mean-pooled into a body
-// context; a shared decoder ρ reads each token's embedding plus the context
-// and outputs that actuator's valve command. The weights therefore do not
-// depend on the number of actuators, and the network is
-// permutation-equivariant over actuators (a Deep Sets architecture).
+// The network reads three things. Each actuator is a token. Each body
+// part (a link with real mass) is a token too, describing the body's own
+// shape: how long the part is, how big, how heavy, where it is and
+// whether it is on the floor. The global vector holds the IMU, the
+// centre of gravity and the command.
 //
-// Mean pooling is the starting point; attention over actuator tokens can
-// replace it later without changing Act's signature.
+// A shared part encoder embeds every part token with the global vector;
+// those embeddings are mean-pooled into a body-shape context that is
+// appended to the global vector. A shared actuator encoder φ then embeds
+// every actuator token, the embeddings are mean-pooled into a body
+// context, and a shared decoder ρ reads each actuator's embedding with
+// both contexts and outputs that actuator's valve command. No weight
+// depends on how many actuators or parts the body has, and the network is
+// permutation-equivariant over both (a Deep Sets architecture).
+//
+// Inputs are normalised by running statistics that are saved with the
+// weights, so the same checkpoint behaves the same in training and in the
+// sim server.
 package policy
 
 import (
@@ -18,6 +27,17 @@ import (
 	"math"
 	"math/rand"
 )
+
+// Obs is one observation.
+type Obs struct {
+	Tokens [][]float64 // one per actuator
+	Parts  [][]float64 // one per body part
+	Global []float64
+	// Priv holds privileged facts only the simulator knows (true
+	// velocity, height, friction, harness). Only the critic reads them,
+	// so the policy never depends on them.
+	Priv []float64
+}
 
 // Dense is a fully connected layer. W is row-major, Out×In.
 type Dense struct {
@@ -62,72 +82,143 @@ func newMLP(rng *rand.Rand, sizes ...int) MLP {
 	return m
 }
 
-func (m *MLP) forward(x []float64) []float64 {
-	for i := range m.Layers {
-		x = m.Layers[i].forward(x)
-		if i < len(m.Layers)-1 {
-			for j := range x {
-				x[j] = math.Tanh(x[j])
-			}
-		}
-	}
-	return x
+// Normalizer standardises a feature vector with running mean and variance
+// (merged batch by batch), clipping the result to ±5.
+type Normalizer struct {
+	Mean  []float64 `json:"mean"`
+	Var   []float64 `json:"var"`
+	Count float64   `json:"count"`
 }
 
-// SetPolicy is the movement network. Shapes depend only on the per-token
-// and global feature sizes, never on the actuator count.
-type SetPolicy struct {
-	TokenDim  int `json:"tokenDim"`
-	GlobalDim int `json:"globalDim"`
-	Embed     int `json:"embed"`
-	Phi       MLP `json:"phi"` // [token, global] -> embedding
-	Rho       MLP `json:"rho"` // [embedding, context, global] -> command
-	// LogStd is the log of the exploration noise added to every command
-	// during training (one value shared by all actuators).
-	LogStd []float64 `json:"logStd"`
+func NewNormalizer(n int) *Normalizer {
+	z := &Normalizer{Mean: make([]float64, n), Var: make([]float64, n)}
+	for i := range z.Var {
+		z.Var[i] = 1
+	}
+	return z
 }
 
-// New creates a randomly initialised policy.
-func New(rng *rand.Rand, tokenDim, globalDim, embed, hidden int) *SetPolicy {
-	return &SetPolicy{
-		TokenDim:  tokenDim,
-		GlobalDim: globalDim,
-		Embed:     embed,
-		Phi:       newMLP(rng, tokenDim+globalDim, hidden, embed),
-		Rho:       newMLP(rng, 2*embed+globalDim, hidden, 1),
-		LogStd:    []float64{DefaultLogStd},
+// varFloor keeps features that barely vary (one body's fixed geometry)
+// from being blown up.
+const varFloor = 1e-3
+
+// Apply returns the normalised copy of x.
+func (z *Normalizer) Apply(x []float64) []float64 {
+	y := make([]float64, len(x))
+	if z == nil {
+		copy(y, x)
+		return y
 	}
+	for i, v := range x {
+		y[i] = math.Max(-5, math.Min(5, (v-z.Mean[i])/math.Sqrt(z.Var[i]+varFloor)))
+	}
+	return y
 }
 
-// Act returns one valve command in [-1, 1] per actuator token.
-func (p *SetPolicy) Act(tokens [][]float64, global []float64) []float64 {
-	if len(tokens) == 0 {
-		return nil
-	}
-	emb := make([][]float64, len(tokens))
-	ctx := make([]float64, p.Embed)
-	for i, tok := range tokens {
-		in := append(append(make([]float64, 0, p.TokenDim+p.GlobalDim), tok...), global...)
-		h := p.Phi.forward(in)
-		for j := range h {
-			h[j] = math.Tanh(h[j])
-			ctx[j] += h[j] / float64(len(tokens))
-		}
-		emb[i] = h
-	}
-	out := make([]float64, len(tokens))
-	for i, h := range emb {
-		in := make([]float64, 0, 2*p.Embed+p.GlobalDim)
-		in = append(append(append(in, h...), ctx...), global...)
-		out[i] = math.Tanh(p.Rho.forward(in)[0])
+func (z *Normalizer) applyAll(xs [][]float64) [][]float64 {
+	out := make([][]float64, len(xs))
+	for i, x := range xs {
+		out[i] = z.Apply(x)
 	}
 	return out
 }
 
+// Update merges a batch of rows into the statistics.
+func (z *Normalizer) Update(rows [][]float64) {
+	if z == nil || len(rows) == 0 {
+		return
+	}
+	n := float64(len(rows))
+	for i := range z.Mean {
+		bm, bv := 0.0, 0.0
+		for _, r := range rows {
+			bm += r[i]
+		}
+		bm /= n
+		for _, r := range rows {
+			d := r[i] - bm
+			bv += d * d
+		}
+		bv /= n
+		if z.Count == 0 {
+			z.Mean[i], z.Var[i] = bm, bv
+			continue
+		}
+		tot := z.Count + n
+		d := bm - z.Mean[i]
+		z.Mean[i] += d * n / tot
+		z.Var[i] = (z.Var[i]*z.Count + bv*n + d*d*z.Count*n/tot) / tot
+	}
+	z.Count += n
+}
+
+func (z *Normalizer) clone() *Normalizer {
+	if z == nil {
+		return nil
+	}
+	return &Normalizer{Mean: append([]float64(nil), z.Mean...), Var: append([]float64(nil), z.Var...), Count: z.Count}
+}
+
+// SetPolicy is the movement network. Shapes depend only on the feature
+// sizes, never on the actuator or part count.
+type SetPolicy struct {
+	// ObsVersion is the observation layout the weights were trained on
+	// (obs.Version); a checkpoint from another layout is refused.
+	ObsVersion int `json:"obsVersion"`
+	TokenDim   int `json:"tokenDim"`
+	PartDim    int `json:"partDim"`
+	GlobalDim  int `json:"globalDim"`
+	Embed      int `json:"embed"`
+	Part       MLP `json:"part"` // [part, global] -> part embedding
+	Phi        MLP `json:"phi"`  // [token, global, body shape] -> embedding
+	Rho        MLP `json:"rho"`  // [embedding, context, global, body shape] -> command
+	// LogStd is the log of the exploration noise added to every command
+	// during training (one value shared by all actuators).
+	LogStd   []float64   `json:"logStd"`
+	TokNorm  *Normalizer `json:"tokNorm"`
+	PartNorm *Normalizer `json:"partNorm"`
+	GloNorm  *Normalizer `json:"globalNorm"`
+}
+
+// New creates a randomly initialised policy.
+func New(rng *rand.Rand, tokenDim, partDim, globalDim, embed, hidden int) *SetPolicy {
+	g2 := globalDim + embed
+	return &SetPolicy{
+		TokenDim: tokenDim, PartDim: partDim, GlobalDim: globalDim, Embed: embed,
+		Part:     newMLP(rng, partDim+globalDim, hidden, embed),
+		Phi:      newMLP(rng, tokenDim+g2, hidden, embed),
+		Rho:      newMLP(rng, 2*embed+g2, hidden, 1),
+		LogStd:   []float64{DefaultLogStd},
+		TokNorm:  NewNormalizer(tokenDim),
+		PartNorm: NewNormalizer(partDim),
+		GloNorm:  NewNormalizer(globalDim),
+	}
+}
+
+// Act returns one valve command in [-1, 1] per actuator token.
+func (p *SetPolicy) Act(o *Obs) []float64 {
+	if len(o.Tokens) == 0 {
+		return nil
+	}
+	return p.Forward(o).Mu
+}
+
+// UpdateNorms folds a batch of observations into the input statistics.
+func (p *SetPolicy) UpdateNorms(batch []*Obs) {
+	var toks, parts, globs [][]float64
+	for _, o := range batch {
+		toks = append(toks, o.Tokens...)
+		parts = append(parts, o.Parts...)
+		globs = append(globs, o.Global)
+	}
+	p.TokNorm.Update(toks)
+	p.PartNorm.Update(parts)
+	p.GloNorm.Update(globs)
+}
+
 // Save writes a checkpoint. Checkpoints are independent of any body spec.
 func (p *SetPolicy) Save(w io.Writer) error {
-	enc := json.NewEncoder(w)
-	return enc.Encode(p)
+	return json.NewEncoder(w).Encode(p)
 }
 
 // Load reads a checkpoint written by Save.
@@ -136,14 +227,23 @@ func Load(r io.Reader) (*SetPolicy, error) {
 	if err := json.NewDecoder(r).Decode(&p); err != nil {
 		return nil, err
 	}
-	if len(p.Phi.Layers) == 0 || len(p.Rho.Layers) == 0 {
-		return nil, fmt.Errorf("checkpoint has no layers")
+	if err := p.Check(); err != nil {
+		return nil, err
 	}
-	if p.Phi.Layers[0].In != p.TokenDim+p.GlobalDim {
-		return nil, fmt.Errorf("checkpoint expects %d token+global features, phi takes %d", p.TokenDim+p.GlobalDim, p.Phi.Layers[0].In)
+	return &p, nil
+}
+
+// Check rejects checkpoints whose shapes do not fit together (such as
+// ones written before body-part tokens existed).
+func (p *SetPolicy) Check() error {
+	if len(p.Part.Layers) == 0 || len(p.Phi.Layers) == 0 || len(p.Rho.Layers) == 0 || p.TokNorm == nil {
+		return fmt.Errorf("checkpoint predates body-part inputs (no part encoder); train a new one")
+	}
+	if p.Phi.Layers[0].In != p.TokenDim+p.GlobalDim+p.Embed || p.Part.Layers[0].In != p.PartDim+p.GlobalDim {
+		return fmt.Errorf("checkpoint layer sizes do not match its feature sizes")
 	}
 	if len(p.LogStd) != 1 {
 		p.LogStd = []float64{DefaultLogStd}
 	}
-	return &p, nil
+	return nil
 }

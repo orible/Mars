@@ -67,8 +67,10 @@ func floorPose(w *model.World, rng *rand.Rand, d float64) {
 		return
 	case d < 0.5: // kneel: thighs upright, shins flat behind, toes pointed
 		ok = set("thigh", 0.1*rng.Float64()) && set("shin", -math.Pi/2) && set("foot", -0.6)
-	default: // sit: legs out in front
+	default: // sit: legs out in front, elbows bent so the hands rest by the hips
 		ok = set("thigh", math.Pi/2) && set("shin", -0.2*rng.Float64()) && set("foot", 0)
+		set("shoulder", -0.3+0.4*rng.Float64())
+		set("forearm", 1.2+0.5*rng.Float64())
 	}
 	if !ok {
 		LieDown(w, rng)

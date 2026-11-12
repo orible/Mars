@@ -23,6 +23,7 @@ import (
 	"mars/sim/geom"
 	"mars/sim/model"
 	"mars/sim/obs"
+	"mars/sim/policy"
 	"mars/sim/world"
 )
 
@@ -57,6 +58,7 @@ type Env struct {
 	feet    []foot
 	up      bool    // upright at the last step
 	prevPot float64 // get-up shaping potential at the last step
+	head    int     // the part highest up in the neutral pose (the sensor head's link)
 
 	// Motion is the human reference being tracked while getting up (nil
 	// if the scenario has none or the body has no recognisable legs).
@@ -99,6 +101,7 @@ func (e *Env) Reset() {
 	e.W.Ground.Mu = wl.Friction
 	e.h0 = e.W.StandHeight()
 	e.findFeet() // in the neutral standing pose
+	e.head = headLink(m)
 	e.Tracker = world.NewTracker(wl)
 	e.Loop.Reset(0)
 	e.Cmd = command.Stop
@@ -171,9 +174,56 @@ func (e *Env) findFeet() {
 	}
 }
 
-// Observe returns the policy inputs for the current state.
-func (e *Env) Observe() ([][]float64, []float64) {
-	return obs.Build(e.W, obs.ReadIMU(e.W), e.Cmd)
+// headLink is the part whose centre of mass is highest in the neutral
+// pose: the chest that carries the head, or the pelvis on a legs-only body.
+func headLink(m *model.Model) int {
+	ps := m.NewPose()
+	m.FK(make([]float64, m.NDof()), ps)
+	best, hy := 0, math.Inf(-1)
+	total := m.TotalMass()
+	for i := range m.Names {
+		if m.Mass[i] < obs.PartMinMass*total {
+			continue
+		}
+		if y := m.Point(ps, i, m.Com[i])[1]; y > hy {
+			best, hy = i, y
+		}
+	}
+	return best
+}
+
+// PrivDim is the number of privileged features (see Observe).
+const PrivDim = 11
+
+// Observe returns the policy inputs for the current state, plus the
+// privileged facts only the critic sees: pelvis height and velocity,
+// floor friction, harness, progress along the human reference, whether
+// it is up, how much of the episode is left, and balance over the feet.
+func (e *Env) Observe() *policy.Obs {
+	w := e.W
+	o := obs.Build(w, obs.ReadIMU(w), e.Cmd)
+	yaw := math.Atan2(-w.Base.R[2][0], w.Base.R[0][0])
+	hd := geom.AxisAngle(geom.V3{0, 1, 0}, yaw).T()
+	v := hd.MulV(w.Base.V).Scale(1 / math.Sqrt(9.81*e.h0))
+	var prog, merr float64
+	if e.Motion != nil {
+		prog, merr = e.Motion.Progress, e.Motion.Error
+	}
+	up := 0.0
+	if e.up {
+		up = 1
+	}
+	o.Priv = []float64{
+		w.Base.P[1] / e.h0,
+		v[0], v[1], v[2],
+		w.Ground.Mu,
+		w.Harness.Strength,
+		prog, merr,
+		up,
+		e.Seconds() / e.Cfg.EpisodeSeconds,
+		e.overFeet(),
+	}
+	return o
 }
 
 // Step runs the command loop, applies one valve command per cylinder for
@@ -305,7 +355,9 @@ func (e *Env) upReward(valves []float64) float64 {
 	}
 	tilt := 1 - w.Up()[1]
 	height := math.Abs(w.Base.P[1]/e.h0 - 1)
-	upright := math.Exp(-(10*tilt + 5*height + 0.1*w.Base.W.Norm() + 0.2*effort(valves)))
+	// The head carries the sensors: keep it level as well as the pelvis.
+	headTilt := 1 - w.Pose.R[e.head][1][1]
+	upright := math.Exp(-(10*tilt + 5*height + 6*headTilt + 0.1*w.Base.W.Norm() + 0.2*effort(valves)))
 
 	// Pelvis velocity over the step, in the heading frame.
 	yaw := math.Atan2(-w.Base.R[2][0], w.Base.R[0][0])
