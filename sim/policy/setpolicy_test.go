@@ -20,10 +20,10 @@ func randTokens(rng *rand.Rand, n, dim int) [][]float64 {
 
 func TestArbitraryActuatorCount(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	p := New(rng, 10, 7, 8, 32, 64)
+	p := New(rng, 10, 7, 4, 8, 32, 64)
 	global := randTokens(rng, 1, 8)[0]
 	for _, n := range []int{1, 3, 6, 13} {
-		out := p.Act(&Obs{Tokens: randTokens(rng, n, 10), Parts: randTokens(rng, n+2, 7), Global: global})
+		out := p.Act(&Obs{Tokens: randTokens(rng, n, 10), Parts: randTokens(rng, n+2, 7), Sensors: randTokens(rng, n%3, 4), Global: global})
 		if len(out) != n {
 			t.Fatalf("n=%d: got %d outputs", n, len(out))
 		}
@@ -37,7 +37,7 @@ func TestArbitraryActuatorCount(t *testing.T) {
 
 func TestPermutationEquivariant(t *testing.T) {
 	rng := rand.New(rand.NewSource(2))
-	p := New(rng, 10, 7, 8, 32, 64)
+	p := New(rng, 10, 7, 4, 8, 32, 64)
 	global := randTokens(rng, 1, 8)[0]
 	tokens := randTokens(rng, 5, 10)
 	parts := randTokens(rng, 4, 7)
@@ -59,7 +59,7 @@ func TestPermutationEquivariant(t *testing.T) {
 
 func TestCheckpointRoundTrip(t *testing.T) {
 	rng := rand.New(rand.NewSource(3))
-	p := New(rng, 10, 7, 8, 16, 32)
+	p := New(rng, 10, 7, 4, 8, 16, 32)
 	p.TokNorm.Update(randTokens(rng, 20, 10))
 	var buf bytes.Buffer
 	if err := p.Save(&buf); err != nil {

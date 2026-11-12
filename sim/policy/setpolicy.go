@@ -1,14 +1,16 @@
 // Package policy holds the morphology-agnostic movement network.
 //
-// The network reads three things. Each actuator is a token. Each body
-// part (a link with real mass) is a token too, describing the body's own
-// shape: how long the part is, how big, how heavy, where it is and
-// whether it is on the floor. The global vector holds the IMU, the
-// centre of gravity and the command.
+// The network reads four things. Each actuator is a token. Each body
+// part (a link with real mass, or one that touches the floor) is a token
+// too, describing the body's own shape: how long the part is, how big,
+// how heavy, where it is and whether it is on the floor. Each sensor (a
+// pressure pad on a sole, the tension in a tendon) is a token: where it
+// is and what it feels. The global vector holds the IMU, the centre of
+// gravity and the command.
 //
-// A shared part encoder embeds every part token with the global vector;
-// those embeddings are mean-pooled into a body-shape context that is
-// appended to the global vector. A shared actuator encoder φ then embeds
+// Shared encoders embed every part token and every sensor token with the
+// global vector; each set is mean-pooled into a context (body shape, what
+// the feet feel) appended to the global vector. A shared actuator encoder φ then embeds
 // every actuator token, the embeddings are mean-pooled into a body
 // context, and a shared decoder ρ reads each actuator's embedding with
 // both contexts and outputs that actuator's valve command. No weight
@@ -30,8 +32,9 @@ import (
 
 // Obs is one observation.
 type Obs struct {
-	Tokens [][]float64 // one per actuator
-	Parts  [][]float64 // one per body part
+	Tokens  [][]float64 // one per actuator
+	Parts   [][]float64 // one per body part
+	Sensors [][]float64 // one per sensor (may be none)
 	Global []float64
 	// Priv holds privileged facts only the simulator knows (true
 	// velocity, height, friction, harness). Only the critic reads them,
@@ -167,30 +170,35 @@ type SetPolicy struct {
 	ObsVersion int `json:"obsVersion"`
 	TokenDim   int `json:"tokenDim"`
 	PartDim    int `json:"partDim"`
+	SensorDim  int `json:"sensorDim"`
 	GlobalDim  int `json:"globalDim"`
 	Embed      int `json:"embed"`
-	Part       MLP `json:"part"` // [part, global] -> part embedding
-	Phi        MLP `json:"phi"`  // [token, global, body shape] -> embedding
-	Rho        MLP `json:"rho"`  // [embedding, context, global, body shape] -> command
+	Part       MLP `json:"part"`   // [part, global] -> part embedding
+	Sensor     MLP `json:"sensor"` // [sensor, global] -> sensor embedding
+	Phi        MLP `json:"phi"`    // [token, global, body shape, feel] -> embedding
+	Rho        MLP `json:"rho"`    // [embedding, context, global, body shape, feel] -> command
 	// LogStd is the log of the exploration noise added to every command
 	// during training (one value shared by all actuators).
 	LogStd   []float64   `json:"logStd"`
 	TokNorm  *Normalizer `json:"tokNorm"`
 	PartNorm *Normalizer `json:"partNorm"`
+	SensNorm *Normalizer `json:"sensorNorm"`
 	GloNorm  *Normalizer `json:"globalNorm"`
 }
 
 // New creates a randomly initialised policy.
-func New(rng *rand.Rand, tokenDim, partDim, globalDim, embed, hidden int) *SetPolicy {
-	g2 := globalDim + embed
+func New(rng *rand.Rand, tokenDim, partDim, sensorDim, globalDim, embed, hidden int) *SetPolicy {
+	g2 := globalDim + 2*embed
 	return &SetPolicy{
-		TokenDim: tokenDim, PartDim: partDim, GlobalDim: globalDim, Embed: embed,
+		TokenDim: tokenDim, PartDim: partDim, SensorDim: sensorDim, GlobalDim: globalDim, Embed: embed,
 		Part:     newMLP(rng, partDim+globalDim, hidden, embed),
+		Sensor:   newMLP(rng, sensorDim+globalDim, hidden, embed),
 		Phi:      newMLP(rng, tokenDim+g2, hidden, embed),
 		Rho:      newMLP(rng, 2*embed+g2, hidden, 1),
 		LogStd:   []float64{DefaultLogStd},
 		TokNorm:  NewNormalizer(tokenDim),
 		PartNorm: NewNormalizer(partDim),
+		SensNorm: NewNormalizer(sensorDim),
 		GloNorm:  NewNormalizer(globalDim),
 	}
 }
@@ -205,14 +213,16 @@ func (p *SetPolicy) Act(o *Obs) []float64 {
 
 // UpdateNorms folds a batch of observations into the input statistics.
 func (p *SetPolicy) UpdateNorms(batch []*Obs) {
-	var toks, parts, globs [][]float64
+	var toks, parts, sens, globs [][]float64
 	for _, o := range batch {
 		toks = append(toks, o.Tokens...)
 		parts = append(parts, o.Parts...)
+		sens = append(sens, o.Sensors...)
 		globs = append(globs, o.Global)
 	}
 	p.TokNorm.Update(toks)
 	p.PartNorm.Update(parts)
+	p.SensNorm.Update(sens)
 	p.GloNorm.Update(globs)
 }
 
@@ -236,10 +246,10 @@ func Load(r io.Reader) (*SetPolicy, error) {
 // Check rejects checkpoints whose shapes do not fit together (such as
 // ones written before body-part tokens existed).
 func (p *SetPolicy) Check() error {
-	if len(p.Part.Layers) == 0 || len(p.Phi.Layers) == 0 || len(p.Rho.Layers) == 0 || p.TokNorm == nil {
-		return fmt.Errorf("checkpoint predates body-part inputs (no part encoder); train a new one")
+	if len(p.Part.Layers) == 0 || len(p.Sensor.Layers) == 0 || len(p.Phi.Layers) == 0 || len(p.Rho.Layers) == 0 || p.TokNorm == nil || p.SensNorm == nil {
+		return fmt.Errorf("checkpoint predates body-part and sensor inputs; train a new one")
 	}
-	if p.Phi.Layers[0].In != p.TokenDim+p.GlobalDim+p.Embed || p.Part.Layers[0].In != p.PartDim+p.GlobalDim {
+	if p.Phi.Layers[0].In != p.TokenDim+p.GlobalDim+2*p.Embed || p.Part.Layers[0].In != p.PartDim+p.GlobalDim || p.Sensor.Layers[0].In != p.SensorDim+p.GlobalDim {
 		return fmt.Errorf("checkpoint layer sizes do not match its feature sizes")
 	}
 	if len(p.LogStd) != 1 {

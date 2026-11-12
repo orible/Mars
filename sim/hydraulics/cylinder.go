@@ -26,6 +26,11 @@ type Params struct {
 	// ReliefPressure caps this cylinder's chamber pressures, setting its
 	// force ceiling. 0 means 120 % of the supply pressure.
 	ReliefPressure float64 `json:"reliefPressure,omitempty"`
+	// PressureControl makes the valve a force servo: the command sets the
+	// piston force (−1..1 of the rod side's full force) instead of the
+	// spool opening, so the cylinder acts like a spring whose stiffness
+	// the policy chooses (a tendon foot that conforms to the ground).
+	PressureControl bool `json:"pressureControl,omitempty"`
 	// Mass is the moving mass for the standalone bench model (Step) only;
 	// in the articulated sim the piston mass is lumped into the links.
 	Mass float64 `json:"mass,omitempty"`
@@ -49,7 +54,7 @@ type State struct {
 	V     float64 `json:"v"`     // m/s
 	PA    float64 `json:"pA"`    // Pa, cap-side chamber
 	PB    float64 `json:"pB"`    // Pa, rod-side chamber
-	Spool float64 `json:"spool"` // -1..1, actual spool position
+	Spool float64 `json:"spool"` // -1..1, actual spool position (force target, lagged, under PressureControl)
 }
 
 // NewState places the piston mid-stroke at rest: the rod side at half
@@ -61,6 +66,10 @@ func NewState(p Params, s Supply) State {
 	pb := s.Pressure / 2
 	return State{X: p.Stroke / 2, PA: pb * p.RodArea / p.BoreArea, PB: pb}
 }
+
+// pressureGain opens a force-controlled valve fully when the force is a
+// quarter of its full value off target.
+const pressureGain = 4
 
 // linearBelow is the pressure difference below which orifice flow is treated
 // as linear, avoiding the infinite slope of sqrt at zero.
@@ -92,6 +101,12 @@ func StepPressures(p Params, s Supply, st *State, cmd, x, v, dt float64) {
 	}
 
 	u := st.Spool
+	if p.PressureControl {
+		// Spool holds the (lagged) force target; the valve's own
+		// pressure feedback is fast next to the pilot, so it acts at once.
+		full := s.Pressure * p.RodArea
+		u = math.Max(-1, math.Min(1, pressureGain*(st.Spool*full-Force(p, *st))/full))
+	}
 	var qA, qB float64
 	if u >= 0 { // supply -> A, B -> tank
 		qA = u * p.ValveGain * orifice(s.Pressure, st.PA)

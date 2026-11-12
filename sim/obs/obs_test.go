@@ -100,7 +100,19 @@ func TestMirrorMatchesMirroredState(t *testing.T) {
 			t.Errorf("part %d has no twin: %v", i, p)
 		}
 	}
-	if len(oa.Parts) != 12 {
-		t.Errorf("%d parts, want pelvis, lumbar-moved abdomen, 2×(thigh, shin, foot, upper arm, forearm) = 12", len(oa.Parts))
+	for i, p := range oa.Sensors {
+		found := false
+		for _, q := range ob.Sensors {
+			found = found || same(p, q)
+		}
+		if !found {
+			t.Errorf("sensor %d has no twin: %v", i, p)
+		}
+	}
+	if len(oa.Parts) != 16 {
+		t.Errorf("%d parts, want pelvis, abdomen, 2×(thigh, shin, heel, midfoot, toes, upper arm, forearm) = 16", len(oa.Parts))
+	}
+	if len(oa.Sensors) != 2*(9+1) {
+		t.Errorf("%d sensors, want 2×(9 sole pads + 1 plantar tendon) = 20", len(oa.Sensors))
 	}
 }

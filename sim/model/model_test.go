@@ -97,7 +97,8 @@ func TestSpans(t *testing.T) {
 		"hip_pitch_l": {"hip_roll_l", "thigh_l"},
 		"hip_roll_r":  {"hip_roll_r", "thigh_r"},
 		"knee_l":      {"shin_l"},
-		"ankle_r":     {"foot_r"},
+		"ankle_r":     {"foot_r", "heel_r"}, // to the heel, past the subtalar joint
+		"stirrup_l":   {"foot_l", "heel_l"}, // cables from the shin to the heel
 	}
 	for _, c := range m.Cyl {
 		w, ok := want[c.Name]

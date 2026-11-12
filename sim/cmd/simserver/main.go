@@ -58,6 +58,8 @@ type LinkFrame struct {
 	Parent int     `json:"parent"`
 	Origin geom.V3 `json:"origin"`
 	Com    geom.V3 `json:"com"`
+	Axis   geom.V3 `json:"axis"` // joint axis (world), zero for the pelvis
+	Mass   float64 `json:"mass"`
 }
 
 type CylFrame struct {
@@ -70,11 +72,26 @@ type CylFrame struct {
 	PA      float64 `json:"pA"`
 	PB      float64 `json:"pB"`
 	Command float64 `json:"cmd"`
+	// Cables are a tendon drive's runs (world polylines); ForceControl
+	// marks a force-controlled valve, whose command is a force.
+	Cables       [][]geom.V3 `json:"cables,omitempty"`
+	ForceControl bool        `json:"forceControl,omitempty"`
+	BoreArea     float64     `json:"boreArea"`
+	RodArea      float64     `json:"rodArea"`
+}
+
+// TendonFrame is a passive tendon: its path and tension.
+type TendonFrame struct {
+	Name    string    `json:"name"`
+	Path    []geom.V3 `json:"path"`
+	Tension float64   `json:"tension"` // N
 }
 
 type ContactFrame struct {
 	P geom.V3 `json:"p"` // world position
 	F geom.V3 `json:"f"` // ground force on the robot, N
+	// Pad marks a contact with a pressure sensor (a sole pad).
+	Pad bool `json:"pad,omitempty"`
 }
 
 type Frame struct {
@@ -93,6 +110,8 @@ type Frame struct {
 	Links     []LinkFrame    `json:"links"`
 	Cylinders []CylFrame     `json:"cylinders"`
 	Contacts  []ContactFrame `json:"contacts"`
+	Tendons   []TendonFrame  `json:"tendons"`
+	Floor     []model.Wave   `json:"floor,omitempty"` // floor bumps (flat when empty)
 	// Command loop: what the LLM (or its stand-in) was told and said.
 	Objective *world.XZ       `json:"objective"`
 	Reached   int             `json:"reached"`
@@ -422,9 +441,17 @@ func (s *sim) frame() Frame {
 	s.llm.mu.Lock()
 	f.Prompt = s.llm.prompt
 	s.llm.mu.Unlock()
-	for i, c := range m.Contacts {
-		f.Contacts = append(f.Contacts, ContactFrame{P: m.Point(w.Pose, c.Link, c.Point), F: w.ContactF[i]})
+	pads := map[int]bool{}
+	for _, sn := range m.Sensors {
+		pads[sn.Contact] = true
 	}
+	for i, c := range m.Contacts {
+		f.Contacts = append(f.Contacts, ContactFrame{P: m.Point(w.Pose, c.Link, c.Point), F: w.ContactF[i], Pad: pads[i]})
+	}
+	for t, tn := range m.Tendons {
+		f.Tendons = append(f.Tendons, TendonFrame{Name: tn.Name, Path: m.RoutePoints(w.Pose, t, true)[0], Tension: w.TendonT[t]})
+	}
+	f.Floor = w.Ground.Bumps
 	for q := range w.Q {
 		l := q + 1
 		j := JointFrame{Name: m.Names[l], Kind: axisKind(m.Axis[l]), Q: w.Q[q], Lo: m.Lo[l], Hi: m.Hi[l], Reach: [2]float64{m.Lo[l], m.Hi[l]}}
@@ -436,13 +463,14 @@ func (s *sim) frame() Frame {
 		f.Joints = append(f.Joints, j)
 	}
 	for i, name := range m.Names {
-		f.Links = append(f.Links, LinkFrame{Name: name, Parent: m.Parent[i], Origin: w.Pose.P[i], Com: m.Point(w.Pose, i, m.Com[i])})
+		f.Links = append(f.Links, LinkFrame{Name: name, Parent: m.Parent[i], Origin: w.Pose.P[i], Com: m.Point(w.Pose, i, m.Com[i]), Axis: w.Pose.Z[i], Mass: m.Mass[i]})
 	}
 	for k, c := range m.Cyl {
 		st := w.Cyl[k]
 		f.Cylinders = append(f.Cylinders, CylFrame{
 			Name: c.Name, Base: m.Point(w.Pose, c.BaseLink, c.Base), Rod: m.Point(w.Pose, c.RodLink, c.Rod),
 			Stroke: c.P.Stroke, X: st.X, V: st.V, PA: st.PA, PB: st.PB, Command: w.Cmd[k],
+			Cables: m.RoutePoints(w.Pose, k, false), ForceControl: c.P.PressureControl, BoreArea: c.P.BoreArea, RodArea: c.P.RodArea,
 		})
 	}
 	return f
@@ -512,7 +540,7 @@ func loadPolicy(path string) (*policy.SetPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if p.ObsVersion != obs.Version || p.TokenDim != obs.TokenDim || p.PartDim != obs.PartDim || p.GlobalDim != obs.GlobalDim {
+	if p.ObsVersion != obs.Version || p.TokenDim != obs.TokenDim || p.PartDim != obs.PartDim || p.SensorDim != obs.SensorDim || p.GlobalDim != obs.GlobalDim {
 		return nil, fmt.Errorf("%s: checkpoint uses observation layout %d, the simulator provides layout %d", path, p.ObsVersion, obs.Version)
 	}
 	return p, nil
@@ -596,7 +624,7 @@ func main() {
 	}
 
 	rng := rand.New(rand.NewSource(*seed))
-	pol := policy.New(rng, obs.TokenDim, obs.PartDim, obs.GlobalDim, 64, 128)
+	pol := policy.New(rng, obs.TokenDim, obs.PartDim, obs.SensorDim, obs.GlobalDim, 64, 128)
 	pol.ObsVersion = obs.Version
 	ctx := context.Background()
 	policies := make(chan *policy.SetPolicy, 1)

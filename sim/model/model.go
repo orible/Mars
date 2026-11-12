@@ -19,19 +19,51 @@ import (
 	"mars/sim/hydraulics"
 )
 
+// route is a compiled signed polyline (a cylinder's pins, or a cable).
+type route struct {
+	Sign  float64
+	Links []int
+	Pts   []geom.V3
+}
+
 // Cyl is a compiled cylinder.
 type Cyl struct {
 	Name              string
 	BaseLink, RodLink int
-	Base, Rod         geom.V3 // anchor points in their link frames
+	Base, Rod         geom.V3 // anchor points in their link frames (the cylinder body)
 	Retracted         float64
 	P                 hydraulics.Params
+	Routes            []route // what its length is measured along: the pins, or its cables
 	// Span lists the joints (as q indices) whose motion changes this
 	// cylinder's length: those on the path between its two links. A
 	// cylinder from pelvis to thigh spans both hip joints; one from
 	// pelvis to shin would span hip and knee.
 	Span []int
 }
+
+// Tendon is a compiled passive cable.
+type Tendon struct {
+	Name         string
+	Route        route
+	Rest, K, C   float64
+	Span         []int
+}
+
+// Sensor is a pressure pad at a contact point. Root is the link the pad
+// belongs to as a whole (the foot it is on), and Local is the pad's place
+// on it in the neutral pose.
+type Sensor struct {
+	Contact int
+	Root    int
+	Local   geom.V3
+}
+
+// limitOmega sets each joint stop's stiffness from the inertia it stops:
+// k = ω²·I, so a toe and a hip both bounce off their stops at about
+// 95 Hz: stiff enough to hold a cylinder pushing into them, stable for the
+// lightest toe at 50 µs steps (ω·dt = 0.03), and gentle enough on the
+// reused mass matrix (MassEvery) to keep momentum drift small.
+const limitOmega = 600 // rad/s
 
 // Model is an immutable compiled body plus scratch space for dynamics.
 // A Model must not be used from several goroutines at once.
@@ -46,7 +78,12 @@ type Model struct {
 	Mass     []float64
 	Lo, Hi   []float64
 	Damping  []float64
-	Cyl      []Cyl
+	// Stiffness is each joint's passive spring towards 0; LimitK and
+	// LimitC are its end stops.
+	Stiffness, LimitK, LimitC []float64
+	Cyl                       []Cyl
+	Tendons                   []Tendon
+	Sensors                   []Sensor
 	Supply   hydraulics.Supply
 	Contacts []Contact
 
@@ -74,6 +111,7 @@ func New(b body.Body) (*Model, error) {
 		Names: make([]string, n), Parent: make([]int, n),
 		Origin: make([]geom.V3, n), Axis: make([]geom.V3, n), Com: make([]geom.V3, n), Inertia: make([]geom.V3, n),
 		Mass: make([]float64, n), Lo: make([]float64, n), Hi: make([]float64, n), Damping: make([]float64, n),
+		Stiffness: make([]float64, n), LimitK: make([]float64, n), LimitC: make([]float64, n),
 		moves: make([][]bool, n),
 		om:    make([]geom.V3, n), al: make([]geom.V3, n), ao: make([]geom.V3, n), f: make([]geom.V3, n), n: make([]geom.V3, n),
 		zero: make([]float64, n-1), unit: make([]float64, n-1), col: make([]float64, n-1),
@@ -83,7 +121,7 @@ func New(b body.Body) (*Model, error) {
 		m.Parent[i] = b.LinkIndex(l.Parent)
 		if l.Joint != nil {
 			m.Origin[i], m.Axis[i] = l.Joint.Origin, l.Joint.Axis.Unit()
-			m.Lo[i], m.Hi[i], m.Damping[i] = l.Joint.Limits[0], l.Joint.Limits[1], l.Joint.Damping
+			m.Lo[i], m.Hi[i], m.Damping[i], m.Stiffness[i] = l.Joint.Limits[0], l.Joint.Limits[1], l.Joint.Damping, l.Joint.Stiffness
 		}
 		m.moves[i] = make([]bool, n)
 		for k := i; k > 0; k = m.Parent[k] {
@@ -93,17 +131,91 @@ func New(b body.Body) (*Model, error) {
 			m.Contacts = append(m.Contacts, Contact{Link: i, Point: p})
 		}
 	}
+	compile := func(c body.Cable) route {
+		r := route{Sign: c.Sign}
+		for _, a := range c.Path {
+			r.Links, r.Pts = append(r.Links, b.LinkIndex(a.Link)), append(r.Pts, a.Point)
+		}
+		return r
+	}
+	// A joint is spanned if it moves some anchor of a route relative to
+	// that route's first anchor.
+	span := func(rs []route) []int {
+		var out []int
+		for j := 1; j < n; j++ {
+			for _, r := range rs {
+				moved := false
+				for _, l := range r.Links[1:] {
+					moved = moved || m.moves[l][j] != m.moves[r.Links[0]][j]
+				}
+				if moved {
+					out = append(out, j-1)
+					break
+				}
+			}
+		}
+		return out
+	}
 	for _, c := range b.Cylinders {
 		cy := Cyl{
 			Name: c.Name, BaseLink: b.LinkIndex(c.Base.Link), RodLink: b.LinkIndex(c.Rod.Link),
 			Base: c.Base.Point, Rod: c.Rod.Point, Retracted: c.RetractedLength, P: c.Params,
 		}
-		for j := 1; j < n; j++ {
-			if m.moves[cy.BaseLink][j] != m.moves[cy.RodLink][j] {
-				cy.Span = append(cy.Span, j-1)
-			}
+		for _, r := range c.Routes() {
+			cy.Routes = append(cy.Routes, compile(r))
 		}
+		cy.Span = span(cy.Routes)
 		m.Cyl = append(m.Cyl, cy)
+	}
+	for _, t := range b.Tendons {
+		r := compile(body.Cable{Sign: 1, Path: t.Path})
+		m.Tendons = append(m.Tendons, Tendon{Name: t.Name, Route: r, Rest: t.RestLength, K: t.Stiffness, C: t.Damping, Span: span([]route{r})})
+	}
+
+	ps := m.NewPose()
+	m.FK(make([]float64, n-1), ps)
+	// Joint stops sized to the inertia each one stops (the subtree about
+	// the joint axis, neutral pose).
+	for l := 1; l < n; l++ {
+		a := ps.Z[l]
+		in := 0.0
+		for i := 1; i < n; i++ {
+			if !m.moves[i][l] {
+				continue
+			}
+			c := m.Point(ps, i, m.Com[i]).Sub(ps.P[l])
+			r := c.Cross(a)
+			in += geom.InertiaMul(ps.R[i], m.Inertia[i], a).Dot(a) + m.Mass[i]*r.Dot(r)
+		}
+		m.LimitK[l], m.LimitC[l] = limitOmega*limitOmega*in, limitOmega*in
+	}
+	// Sensors: a pad's root is found by climbing from its link while the
+	// parent carries no plain (sensorless) contacts: heel → talus bracket,
+	// stopping below the shin.
+	plain := make([]bool, n)
+	first := make([]int, n) // index of each link's first contact
+	for i, l := range b.Links {
+		first[i] = -1
+		sensed := map[int]bool{}
+		for _, k := range l.Sensors {
+			sensed[k] = true
+		}
+		plain[i] = len(l.Contacts) > len(sensed)
+	}
+	for c, ct := range m.Contacts {
+		if first[ct.Link] < 0 {
+			first[ct.Link] = c
+		}
+	}
+	for i, l := range b.Links {
+		root := i
+		for root > 0 && !plain[m.Parent[root]] && m.Parent[root] > 0 {
+			root = m.Parent[root]
+		}
+		for _, k := range l.Sensors {
+			c := first[i] + k
+			m.Sensors = append(m.Sensors, Sensor{Contact: c, Root: root, Local: m.Point(ps, i, m.Contacts[c].Point).Sub(ps.P[root])})
+		}
 	}
 	return m, nil
 }
@@ -147,22 +259,63 @@ func (m *Model) Point(ps *Pose, link int, pt geom.V3) geom.V3 {
 // (positive pushing the pins apart) produces joint torque F·∂L/∂q, so these
 // are the cylinder's signed moment arms in the current pose.
 func (m *Model) CylLength(ps *Pose, k int, dLdq []float64) float64 {
-	c := &m.Cyl[k]
-	b := m.Point(ps, c.BaseLink, c.Base)
-	r := m.Point(ps, c.RodLink, c.Rod)
-	d := r.Sub(b)
-	l := d.Norm()
-	if dLdq != nil {
-		u := d.Scale(1 / l)
-		for i, q := range c.Span {
-			j := q + 1
-			var vel geom.V3
-			if m.moves[c.RodLink][j] {
-				vel = ps.Z[j].Cross(r.Sub(ps.P[j]))
-			} else {
-				vel = ps.Z[j].Cross(b.Sub(ps.P[j])).Scale(-1)
+	return m.routeLength(ps, m.Cyl[k].Routes, m.Cyl[k].Span, dLdq)
+}
+
+// TendonLength is CylLength for passive tendon t.
+func (m *Model) TendonLength(ps *Pose, t int, dLdq []float64) float64 {
+	return m.routeLength(ps, []route{m.Tendons[t].Route}, m.Tendons[t].Span, dLdq)
+}
+
+// RoutePoints returns the world polylines of cylinder k's cables (nil for
+// a plain cylinder) or, with tendon set, of tendon k.
+func (m *Model) RoutePoints(ps *Pose, k int, tendon bool) [][]geom.V3 {
+	rs := []route{}
+	if tendon {
+		rs = append(rs, m.Tendons[k].Route)
+	} else if len(m.Body.Cylinders[k].Cables) > 0 {
+		rs = m.Cyl[k].Routes
+	}
+	var out [][]geom.V3
+	for _, r := range rs {
+		var line []geom.V3
+		for i := range r.Pts {
+			line = append(line, m.Point(ps, r.Links[i], r.Pts[i]))
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// routeLength sums signed polyline lengths and, if dLdq is non-nil, their
+// derivatives with respect to the joints in span.
+func (m *Model) routeLength(ps *Pose, rs []route, span []int, dLdq []float64) float64 {
+	for i := range dLdq {
+		dLdq[i] = 0
+	}
+	l := 0.0
+	for _, r := range rs {
+		prev := m.Point(ps, r.Links[0], r.Pts[0])
+		for i := 1; i < len(r.Pts); i++ {
+			p := m.Point(ps, r.Links[i], r.Pts[i])
+			d := p.Sub(prev)
+			n := d.Norm()
+			l += r.Sign * n
+			if dLdq != nil && n > 0 {
+				u := d.Scale(1 / n)
+				for si, q := range span {
+					j := q + 1
+					var v geom.V3
+					if m.moves[r.Links[i]][j] {
+						v = v.Add(ps.Z[j].Cross(p.Sub(ps.P[j])))
+					}
+					if m.moves[r.Links[i-1]][j] {
+						v = v.Sub(ps.Z[j].Cross(prev.Sub(ps.P[j])))
+					}
+					dLdq[si] += r.Sign * u.Dot(v)
+				}
 			}
-			dLdq[i] = u.Dot(vel)
+			prev = p
 		}
 	}
 	return l

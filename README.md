@@ -13,7 +13,7 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 | `sim/cmd/bodygen` | Writes a human body spec for a height and weight and reports each cylinder's bore, stroke and torque across its range |
 | `sim/model` | Kinematics, cylinder length and moment arms per spanned joint, inverse dynamics, the coupled world step, reach report |
 | `sim/hydraulics` | Double-acting cylinder and servo-valve pressure model (also a standalone bench model) |
-| `sim/obs` | Per-cylinder tokens, per-body-part tokens (the body's sense of its own shape: part length, extent, mass, pose, load on the floor) and a global vector, all scaled to body size; the left–right mirror of an observation |
+| `sim/obs` | Per-cylinder tokens, per-sensor tokens (sole pads: place, pressure, shear, slip; tendon tension), per-body-part tokens (the body's sense of its own shape: part length, extent, mass, pose, load on the floor) and a global vector, all scaled to body size; the left–right mirror of an observation |
 | `sim/policy` | Morphology-agnostic set network (body parts → shape context; shared φ per cylinder → mean pool → shared ρ), input normalisation saved with the weights, critic with privileged inputs, backprop, Adam, JSON checkpoints |
 | `sim/command` | The LLM loop interface: perception text in, JSON command out; the scripted LLM stand-in with latency and misjudgement |
 | `sim/world` | World files (friction, objectives), random worlds, the tracker that produces the perception |
@@ -25,7 +25,7 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 | `training` | Snapshot of the training data (checkpoints and run logs) that git carries between machines |
 | `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec and the policy checkpoint, streams frames on `ws://localhost:8080/ws` |
 | `sim/bodies` | Body specs; edit these as hardware measurements come in |
-| `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG |
+| `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG; a 3D orbit view at `/3d` with every link, joint axis, anchor, cylinder (by chamber pressure), cable, tendon (by tension) and sole pad (by load) |
 
 ## Set up
 
@@ -54,6 +54,11 @@ On the other machine, clone and run setup. It copies the snapshot into `sim/chec
 - **Legs:** hip yaw, roll and pitch, knee, ankle, with the small biped's cylinder layout scaled up.
 - **Spine:** lumbar pitch and side bend driven by two erector cylinders, plus thoracic twist and pitch. The head is part of the chest.
 - **Arms:** shoulder flexion (40° back to 90° forward), shoulder abduction (10° in to 80° out), and an elbow driven by a "triceps" cylinder (0–115°).
+- **Feet:** each foot is three segments with tendons:
+  - **Joints:** heel on a subtalar joint (tilts the sole 30° in, 15° out), midfoot on a sprung arch hinge, toes on a sprung toe joint.
+  - **Plantar fascia:** a passive tendon from heel to toes over the ball of the foot. Bending the toes up winds it and stiffens the arch (the windlass).
+  - **Stirrup:** a force-controlled cylinder in the shin pulls a cable loop behind both ankle bones. One valve tilts the sole either way and sets how firmly it's held.
+  - **Pads:** nine pressure pads on each sole.
 
 The supply is 210 bar. Each cylinder's stroke covers every combination of its joints' limits, and its bore is sized for a torque at the neutral pose. Regenerate the spec, or try another build, with:
 
@@ -77,7 +82,7 @@ cd sim && go test ./... && go run ./cmd/simserver
 dotnet run --project observer
 ```
 
-Open http://localhost:5217. Edit `sim/bodies/biped.json` and the server reloads it within a second, still running the same weights. An invalid edit is rejected with a reason, and the previous body keeps running.
+Open http://localhost:5217, or http://localhost:5217/3d for the 3D view (drag to orbit, right-drag to pan, wheel to zoom, F to follow, hover for numbers). Edit `sim/bodies/biped.json` and the server reloads it within a second, still running the same weights. An invalid edit is rejected with a reason, and the previous body keeps running.
 
 Check how much joint range each cylinder's stroke allows for a spec:
 
@@ -142,6 +147,8 @@ cd sim && go run ./cmd/simserver -policy checkpoints/walk.json -commander extern
 In `walk` and `life`, standing starts may be held by a harness that carries the pelvis along the command while the legs kick and step; it fades as the robot stops falling. Unheld standing starts are logged as "solo", and floor starts as "got up n/m". `simserver -assist 1` shows the held stage.
 
 Continue a run with `-resume`. Resuming the same scenario picks up its iteration count, start level, harness strength and learning rate from `checkpoints/policy.status.json`; `-start-level` and `-assist` on the command line still override. A checkpoint trained on an older observation layout is refused, and you start a new network instead.
+
+Floors and feet: each episode of a built-in scenario draws a floor with bumps up to 1.5–2.5 cm, a softness from gym mat to concrete, and patches of better and worse grip; a quarter stay plain. The sole pads and tendon gauges behave like cheap sensors: some are dead for the episode, each has its own gain and offset error, and they lag and jitter. `-rough-floor` changes the bump height (0 = flat), and `-no-foot-sensors` trains without them for comparison.
 
 How it learns: inputs are normalised by running statistics stored in the checkpoint. The critic also sees what only the simulator knows: true velocity and height, friction, harness and time left. A symmetry loss (`-symmetry`, default 0.5) asks the policy to command the mirror image of every situation the mirror way, so a skill learned on one side carries to the other. The learning rate rises and falls to keep each update's KL divergence near 0.01. The training log adds `lr` and `sym` columns. `-embed` and `-hidden` size a new network (default 64 and 128). The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
 

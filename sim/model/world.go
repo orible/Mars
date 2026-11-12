@@ -13,18 +13,14 @@ var Gravity = geom.V3{0, -9.81, 0}
 const (
 	endStopK = 2e5 // N/m, cylinder end stop stiffness
 	endStopC = 500 // N·s/m
-	// Joint limits are stiff mechanical stops, so a knee at its extension
-	// stop (a few degrees past straight, as in a human knee) locks: the
-	// weight line falls in front of the joint and pushes it into the stop,
-	// and standing needs no cylinder force at the knee.
-	limitK = 2000 // N·m/rad
-	limitC = 10   // N·m·s/rad
-	// limitScale stiffens joint stops further on full-size bodies, whose
-	// cylinders push far harder for their mass than the small robot's.
-	limitScale = 4
 )
 
-// Ground is a flat floor at y = 0. Each contact point is a compliant
+// Joint limits are stiff mechanical stops (Model.LimitK), so a knee at its
+// extension stop (a few degrees past straight, as in a human knee) locks:
+// the weight line falls in front of the joint and pushes it into the
+// stop, and standing needs no cylinder force at the knee.
+
+// Ground is the floor: flat at y = 0 unless Bumps shape it. Each contact point is a compliant
 // spring-damper normally and a stick–slip spring tangentially: while the
 // tangential spring force stays inside the friction cone the point sticks
 // to where it touched down, and beyond it the anchor slides so the force
@@ -34,6 +30,29 @@ type Ground struct {
 	K, C   float64 // N/m, N·s/m: normal stiffness and damping per point
 	Kt, Ct float64 // N/m, N·s/m: tangential (stick) stiffness and damping per point
 	Mu     float64 // Coulomb friction coefficient
+	// Bumps shape the floor: its height is the sum of these waves (zero
+	// for a flat floor). MuWaves make friction patchy: Mu is scaled by
+	// 1 + the sum of these waves.
+	Bumps, MuWaves []Wave
+}
+
+// Wave is A·cos(Kx·x + Kz·z + Phase).
+type Wave struct{ A, Kx, Kz, Phase float64 }
+
+func sumWaves(ws []Wave, x, z float64) float64 {
+	s := 0.0
+	for _, w := range ws {
+		s += w.A * math.Cos(w.Kx*x+w.Kz*z+w.Phase)
+	}
+	return s
+}
+
+// Height is the floor's height under (x, z).
+func (g Ground) Height(x, z float64) float64 { return sumWaves(g.Bumps, x, z) }
+
+// MuAt is the friction coefficient at (x, z).
+func (g Ground) MuAt(x, z float64) float64 {
+	return math.Max(0.05, g.Mu*(1+sumWaves(g.MuWaves, x, z)))
 }
 
 // DefaultGround is a firm, grippy floor: about 1 mm of sink per foot
@@ -101,6 +120,11 @@ type World struct {
 
 	standH  float64
 	stiff   float64 // stiffScale for this body
+	// TendonLen and TendonT are each passive tendon's length and its last
+	// tension (N).
+	TendonLen []float64
+	TendonT   []float64
+	tdLdq     [][]float64
 	massAge int
 	anchor  []geom.V3 // stick point of each touching contact
 	touch   []bool
@@ -138,6 +162,10 @@ func NewWorld(m *Model, floating bool) *World {
 	for i := range w.mm {
 		w.mm[i] = make([]float64, nb+n)
 	}
+	w.TendonLen, w.TendonT = make([]float64, len(m.Tendons)), make([]float64, len(m.Tendons))
+	for t := range m.Tendons {
+		w.tdLdq = append(w.tdLdq, make([]float64, len(m.Tendons[t].Span)))
+	}
 	for k, c := range m.Cyl {
 		w.DLdq[k] = make([]float64, len(c.Span))
 	}
@@ -165,12 +193,15 @@ func (w *World) Place(r geom.M3, q []float64, x, z float64) {
 	}
 	w.Base = Base{R: r}
 	w.refresh()
+	// Rest the lowest point just above the floor under it.
 	lo := math.Inf(1)
 	for _, c := range m.Contacts {
-		lo = math.Min(lo, m.Point(w.Pose, c.Link, c.Point)[1])
+		p := m.Point(w.Pose, c.Link, c.Point)
+		lo = math.Min(lo, p[1]-w.Ground.Height(p[0]+x-w.Pose.P[0][0], p[2]+z-w.Pose.P[0][2]))
 	}
 	for i := range m.Names {
-		lo = math.Min(lo, w.Pose.P[i][1])
+		p := w.Pose.P[i]
+		lo = math.Min(lo, p[1]-w.Ground.Height(p[0]+x-w.Pose.P[0][0], p[2]+z-w.Pose.P[0][2]))
 	}
 	w.Base.P = geom.V3{x, 0.005 - lo, z}
 	w.refresh()
@@ -208,6 +239,9 @@ func (w *World) refresh() {
 	for k := range w.M.Cyl {
 		w.Len[k] = w.M.CylLength(w.Pose, k, w.DLdq[k])
 	}
+	for t := range w.M.Tendons {
+		w.TendonLen[t] = w.M.TendonLength(w.Pose, t, w.tdLdq[t])
+	}
 }
 
 // LengthRate returns cylinder k's extension speed in m/s.
@@ -224,23 +258,24 @@ func (w *World) contacts() {
 	m, g := w.M, w.Ground
 	for i, c := range m.Contacts {
 		p := m.Point(w.Pose, c.Link, c.Point)
-		if p[1] >= 0 {
+		h := g.Height(p[0], p[2])
+		if p[1] >= h {
 			w.touch[i], w.ContactF[i] = false, geom.V3{}
 			continue
 		}
 		v := m.PointVelocity(w.Pose, w.Base.V, w.Base.W, w.Qd, c.Link, p)
-		fn := math.Max(0, -g.K*p[1]-g.C*v[1])
+		fn := math.Max(0, -g.K*(p[1]-h)-g.C*v[1])
 		if !w.touch[i] {
-			w.touch[i], w.anchor[i] = true, geom.V3{p[0], 0, p[2]}
+			w.touch[i], w.anchor[i] = true, geom.V3{p[0], h, p[2]}
 		}
 		ft := geom.V3{
 			-g.Kt*(p[0]-w.anchor[i][0]) - g.Ct*v[0], 0,
 			-g.Kt*(p[2]-w.anchor[i][2]) - g.Ct*v[2],
 		}
-		if mag, lim := ft.Norm(), g.Mu*fn; mag > lim {
+		if mag, lim := ft.Norm(), g.MuAt(p[0], p[2])*fn; mag > lim {
 			// Slipping: limit to the cone and drag the anchor along.
 			ft = ft.Scale(lim / mag)
-			w.anchor[i] = geom.V3{p[0] + ft[0]/g.Kt, 0, p[2] + ft[2]/g.Kt}
+			w.anchor[i] = geom.V3{p[0] + ft[0]/g.Kt, h, p[2] + ft[2]/g.Kt}
 		}
 		f := geom.V3{ft[0], fn, ft[2]}
 		w.ContactF[i] = f
@@ -269,13 +304,28 @@ func (w *World) Step(dt float64) {
 			w.gen[nb+q] += f * w.DLdq[k][i]
 		}
 	}
+	for t := range m.Tendons {
+		tn := &m.Tendons[t]
+		w.TendonT[t] = 0
+		if stretch := w.TendonLen[t] - tn.Rest; stretch > 0 {
+			rate := 0.0
+			for i, q := range tn.Span {
+				rate += w.tdLdq[t][i] * w.Qd[q]
+			}
+			tension := math.Max(0, tn.K*stretch+tn.C*rate)
+			w.TendonT[t] = tension
+			for i, q := range tn.Span {
+				w.gen[nb+q] -= tension * w.tdLdq[t][i]
+			}
+		}
+	}
 	for q := range w.Q {
 		l := q + 1
-		w.gen[nb+q] -= m.Damping[l] * w.Qd[q]
+		w.gen[nb+q] -= m.Damping[l]*w.Qd[q] + m.Stiffness[l]*w.Q[q]
 		if w.Q[q] < m.Lo[l] {
-			w.gen[nb+q] += w.stiff * limitScale * (limitK*(m.Lo[l]-w.Q[q]) - limitC*w.Qd[q])
+			w.gen[nb+q] += m.LimitK[l]*(m.Lo[l]-w.Q[q]) - m.LimitC[l]*w.Qd[q]
 		} else if w.Q[q] > m.Hi[l] {
-			w.gen[nb+q] += w.stiff * limitScale * (limitK*(m.Hi[l]-w.Q[q]) - limitC*w.Qd[q])
+			w.gen[nb+q] += m.LimitK[l]*(m.Hi[l]-w.Q[q]) - m.LimitC[l]*w.Qd[q]
 		}
 	}
 	refactor := w.massAge <= 0
@@ -300,6 +350,12 @@ func (w *World) Step(dt float64) {
 		}
 	}
 	if refactor {
+		// Joint damping is integrated implicitly ((M + dt·C)·q̈ = τ − C·q̇),
+		// so a light toe or arch hinge can carry real tissue damping
+		// without going unstable.
+		for q := range w.Q {
+			w.mm[nb+q][nb+q] += dt * m.Damping[q+1]
+		}
 		cholesky(w.mm)
 	}
 	for i := range w.acc {

@@ -56,6 +56,15 @@ type Scenario struct {
 	// and stays on through falls. The trainer fades it as held get-ups
 	// succeed.
 	AssistFloor bool `json:"assistFloor"`
+
+	// RoughFloor is the largest bump height (m) of a random floor; each
+	// episode draws its own bumps, softness and patchy grip. 0 keeps the
+	// floor flat and firm.
+	RoughFloor float64 `json:"roughFloor"`
+	// NoSensors removes the sole pads and tendon sensors from the
+	// observation, to compare training with and without a sense of the
+	// feet.
+	NoSensors bool `json:"noSensors,omitempty"`
 }
 
 // allRises are the human getting-up references: every built-in one (one
@@ -72,24 +81,24 @@ var Scenarios = map[string]Scenario{
 		Description: "start on the floor and get up, then stay up; the kicking and pushing a baby learns on the floor. Starts crouched and works down through kneeling and sitting to lying flat as get-ups succeed",
 		World:       flatWorld(), LyingFrac: 1, EndOnFall: false, StartLevel: 0.1, Curriculum: true, Reference: allRises,
 		Assist: 1, UnassistedFrac: 0.3, AssistFloor: true,
-		RandomBodyFrac: 0.5, EpisodeSeconds: 20,
+		RandomBodyFrac: 0.5, EpisodeSeconds: 20, RoughFloor: 0.015,
 	},
 	"stand": {
 		Description: "stand still on the stop command through random pushes",
 		World:       flatWorld(), EndOnFall: true,
-		RandomBodyFrac: 0.5, EpisodeSeconds: 6, PushEvery: 2, PushSpeed: [2]float64{0.1, 0.4},
+		RandomBodyFrac: 0.5, EpisodeSeconds: 6, PushEvery: 2, PushSpeed: [2]float64{0.1, 0.4}, RoughFloor: 0.02,
 	},
 	"walk": {
 		Description: "follow the LLM stand-in's walking commands towards random objectives, held by a fading harness at first",
 		Walk:        true, World: world.DefaultRandom(), EndOnFall: true,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 12, PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3},
-		Assist: 1, UnassistedFrac: 0.2,
+		Assist: 1, UnassistedFrac: 0.2, RoughFloor: 0.02,
 	},
 	"life": {
 		Description: "everything at once: start on the floor or standing, get up, walk where told, get pushed, fall and get back up",
 		Walk:        true, World: world.DefaultRandom(), LyingFrac: 0.4, EndOnFall: false, StartLevel: 1, Reference: allRises,
 		RandomBodyFrac: 0.5, EpisodeSeconds: 15, PushEvery: 4, PushSpeed: [2]float64{0.1, 0.3},
-		Assist: 0.5, UnassistedFrac: 0.3,
+		Assist: 0.5, UnassistedFrac: 0.3, RoughFloor: 0.025,
 	},
 }
 

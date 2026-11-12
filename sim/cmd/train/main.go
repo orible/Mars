@@ -91,6 +91,8 @@ func main() {
 	embed := flag.Int("embed", 64, "embedding width of a new network")
 	hidden := flag.Int("hidden", 128, "hidden layer width of a new network")
 	flag.Float64Var(&cfg.Symmetry, "symmetry", cfg.Symmetry, "weight of the left–right symmetry loss (0 = off)")
+	noSensors := flag.Bool("no-foot-sensors", false, "leave the sole pads and tendon sensors out (to compare)")
+	rough := flag.Float64("rough-floor", -1, "largest floor bump in m (default: the scenario's; 0 = flat)")
 	flag.Parse()
 
 	base, err := body.Load(*bodyPath)
@@ -98,9 +100,9 @@ func main() {
 		log.Fatal(err)
 	}
 	rng := rand.New(rand.NewSource(*seed))
-	pol := policy.New(rng, obs.TokenDim, obs.PartDim, obs.GlobalDim, *embed, *hidden)
+	pol := policy.New(rng, obs.TokenDim, obs.PartDim, obs.SensorDim, obs.GlobalDim, *embed, *hidden)
 	pol.ObsVersion = obs.Version
-	val := policy.NewValue(rng, obs.TokenDim, obs.PartDim, obs.GlobalDim+env.PrivDim, *embed, *hidden)
+	val := policy.NewValue(rng, obs.TokenDim, obs.PartDim, obs.SensorDim, obs.GlobalDim+env.PrivDim, *embed, *hidden)
 	valPath := filepath.Join(filepath.Dir(*out), "value-"+filepath.Base(*out))
 	if *resume {
 		pol = &policy.SetPolicy{}
@@ -117,7 +119,7 @@ func main() {
 		if err := readJSON(valPath, val); err != nil {
 			log.Fatal(err)
 		}
-		if val.GlobalDim != obs.GlobalDim+env.PrivDim || val.PartDim != obs.PartDim {
+		if val.GlobalDim != obs.GlobalDim+env.PrivDim || val.PartDim != obs.PartDim || val.SensorDim != obs.SensorDim {
 			log.Fatalf("%s does not match the critic's inputs; train a new network (drop -resume)", valPath)
 		}
 		pol.LogStd[0] = math.Max(ppo.MinLogStd, pol.LogStd[0]) // restore exploration if it had collapsed
@@ -133,6 +135,10 @@ func main() {
 	}
 	if *randomFrac >= 0 {
 		ecfg.RandomBodyFrac = *randomFrac
+	}
+	ecfg.NoSensors = *noSensors
+	if *rough >= 0 {
+		ecfg.RoughFloor = *rough
 	}
 	if *logPath == "" {
 		*logPath = filepath.Join("runs", filepath.Base(strings.TrimSuffix(ecfg.Name, ".json"))+".csv")

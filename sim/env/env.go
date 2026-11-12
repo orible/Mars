@@ -59,6 +59,7 @@ type Env struct {
 	up      bool    // upright at the last step
 	prevPot float64 // get-up shaping potential at the last step
 	head    int     // the part highest up in the neutral pose (the sensor head's link)
+	sense   senseNoise
 
 	// Motion is the human reference being tracked while getting up (nil
 	// if the scenario has none or the body has no recognisable legs).
@@ -82,6 +83,11 @@ func New(base body.Body, cfg Scenario, seed int64) *Env {
 	}
 	e.Loop = command.NewLoop(command.Scripted{Cruise: 0.3, SlowDown: 1.5}, e.rng)
 	e.Reset()
+	// Start each environment part way into its first episode, so the
+	// environments do not all reset in the same iteration.
+	if n := int(cfg.EpisodeSeconds / PolicyDt); n > 1 {
+		e.step = e.rng.Intn(n)
+	}
 	return e
 }
 
@@ -99,6 +105,10 @@ func (e *Env) Reset() {
 	wl := world.Random(e.rng, e.Cfg.World)
 	e.W = model.NewWorld(m, true)
 	e.W.Ground.Mu = wl.Friction
+	if e.Cfg.RoughFloor > 0 && e.rng.Float64() < 0.75 { // a quarter of episodes stay on a plain floor
+		roughen(&e.W.Ground, e.rng, e.Cfg.RoughFloor)
+	}
+	e.sense = newSenseNoise(e.rng, len(m.Sensors)+len(m.Tendons))
 	e.h0 = e.W.StandHeight()
 	e.findFeet() // in the neutral standing pose
 	e.head = headLink(m)
@@ -154,20 +164,29 @@ func LieDown(w *model.World, rng *rand.Rand) {
 	w.Place(yaw.Mul(lie), q, w.Base.P[0], w.Base.P[2])
 }
 
-// findFeet groups contact points by link and keeps the links whose
-// lowest point is within 2 cm of the ground in the neutral pose.
+// findFeet groups the contact points within 2 cm of the ground in the
+// neutral pose into feet: by the sensor root of their link (heel, midfoot
+// and toes are one foot), or by link where there are no sensors.
 func (e *Env) findFeet() {
 	m, w := e.W.M, e.W
 	e.feet = e.feet[:0]
+	root := map[int]int{}
+	for _, s := range m.Sensors {
+		root[m.Contacts[s.Contact].Link] = s.Root
+	}
 	byLink := map[int]int{}
 	for i, c := range m.Contacts {
 		if m.Point(w.Pose, c.Link, c.Point)[1] > 0.02 {
 			continue
 		}
-		j, ok := byLink[c.Link]
+		key := c.Link
+		if r, ok := root[c.Link]; ok {
+			key = r
+		}
+		j, ok := byLink[key]
 		if !ok {
 			j = len(e.feet)
-			byLink[c.Link] = j
+			byLink[key] = j
 			e.feet = append(e.feet, foot{down: true})
 		}
 		e.feet[j].contacts = append(e.feet[j].contacts, i)
@@ -202,6 +221,10 @@ const PrivDim = 11
 func (e *Env) Observe() *policy.Obs {
 	w := e.W
 	o := obs.Build(w, obs.ReadIMU(w), e.Cmd)
+	o.Sensors = e.sense.apply(o.Sensors, e.rng)
+	if e.Cfg.NoSensors {
+		o.Sensors = nil
+	}
 	yaw := math.Atan2(-w.Base.R[2][0], w.Base.R[0][0])
 	hd := geom.AxisAngle(geom.V3{0, 1, 0}, yaw).T()
 	v := hd.MulV(w.Base.V).Scale(1 / math.Sqrt(9.81*e.h0))

@@ -31,7 +31,7 @@ func checkGrad(t *testing.T, name string, params, grads [][]float64, loss func()
 }
 
 func randObs(rng *rand.Rand, n, np, tok, part, glob, priv int) *Obs {
-	o := &Obs{Tokens: randTokens(rng, n, tok), Parts: randTokens(rng, np, part), Global: randTokens(rng, 1, glob)[0]}
+	o := &Obs{Tokens: randTokens(rng, n, tok), Parts: randTokens(rng, np, part), Sensors: randTokens(rng, np+1, 3), Global: randTokens(rng, 1, glob)[0]}
 	if priv > 0 {
 		o.Priv = randTokens(rng, 1, priv)[0]
 	}
@@ -51,8 +51,8 @@ func shake(rng *rand.Rand, zs ...*Normalizer) {
 
 func TestPolicyGradient(t *testing.T) {
 	rng := rand.New(rand.NewSource(4))
-	p := New(rng, 6, 4, 5, 8, 12)
-	shake(rng, p.TokNorm, p.PartNorm, p.GloNorm)
+	p := New(rng, 6, 4, 3, 5, 8, 12)
+	shake(rng, p.TokNorm, p.PartNorm, p.SensNorm, p.GloNorm)
 	o := randObs(rng, 4, 3, 6, 4, 5, 0)
 	w := randTokens(rng, 1, 4)[0]
 	loss := func() float64 {
@@ -69,8 +69,8 @@ func TestPolicyGradient(t *testing.T) {
 
 func TestValueGradient(t *testing.T) {
 	rng := rand.New(rand.NewSource(5))
-	v := NewValue(rng, 6, 4, 5+3, 8, 12)
-	shake(rng, v.TokNorm, v.PartNorm, v.GloNorm)
+	v := NewValue(rng, 6, 4, 3, 5+3, 8, 12)
+	shake(rng, v.TokNorm, v.PartNorm, v.SensNorm, v.GloNorm)
 	o := randObs(rng, 3, 5, 6, 4, 5, 3)
 	loss := func() float64 { return v.Forward(o).V }
 	g := v.Clone(true)

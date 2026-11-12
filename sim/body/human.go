@@ -185,7 +185,7 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 	for _, z := range []float64{-1, 1} {
 		chestContacts = append(chestContacts,
 			T.Add(geom.V3{-0.12 * k, 0.03 * k, z * 0.11 * k}), T.Add(geom.V3{-0.12 * k, 0.22 * k, z * 0.11 * k}), // back
-			T.Add(geom.V3{0.12 * k, 0.08 * k, z * 0.09 * k}), // front
+			T.Add(geom.V3{0.12 * k, 0.08 * k, z * 0.09 * k}),  // front
 			T.Add(geom.V3{0, cs + 0.04*k, z * (sw + 0.02*k)}), // shoulder tops
 			T.Add(geom.V3{0, cs + 0.23*k, z * 0.08 * k}))      // sides of the head
 	}
@@ -220,13 +220,16 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 		joint     string  // the joint it is sized for (its link name)
 		torque    float64 // N·m wanted from the weaker (rod) side at neutral
 		speed     float64 // rad/s of that joint at full valve opening
+		cables    []Cable // a tendon drive's runs (none for a plain cylinder)
+		pressure  bool    // force-controlled valve
 	}
 	var reqs []cylReq
+	var tendons []Tendon
 	tq := M / 102.06 * k // torque scale against the reference man
 	// at returns an anchor on link for a point given in the neutral pelvis frame.
 	at := func(l string, p geom.V3) Anchor { return Anchor{l, jit(p).Sub(origin[l])} }
 	cyl := func(name string, base, rod Anchor, joint string, torque, speed float64) {
-		reqs = append(reqs, cylReq{name, base, rod, joint, torque * tq, speed})
+		reqs = append(reqs, cylReq{name: name, base: base, rod: rod, joint: joint, torque: torque * tq, speed: speed})
 	}
 
 	// Legs: the anchor layout found for the small biped (human-aligned
@@ -263,16 +266,59 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 		link("shin_"+n, "thigh_"+n, knee, geom.V3{0, 0, 1}, -1.57, 0.05, shinM,
 			geom.V3{0, -0.433 * sh, 0}, geom.V3{shinM * math.Pow(0.302*sh, 2), shinM * math.Pow(0.04*k, 2), shinM * math.Pow(0.302*sh, 2)})
 		contacts(knee.Add(geom.V3{0.05 * k, 0, 0}), knee.Add(geom.V3{0.05 * k, -sh / 2, 0}), knee.Add(geom.V3{-0.06 * k, -sh / 2, 0}), knee.Add(geom.V3{0, -sh / 2, z * 0.06 * k}))
+		// Foot: talus (ankle pitch) → heel (subtalar: tilting the sole in
+		// and out) → midfoot (a hinge across the arch, held by a ligament
+		// spring and the plantar fascia) → toes (a sprung toe joint at the
+		// ball of the foot). Every sole contact carries a pressure pad.
 		ankle := knee.Add(geom.V3{0, -sh, 0})
 		footM := mf(0.0145)
 		heel, toe, half := -0.07*k, fl-0.055*k, vary(0.05*k, 0.1)
-		link("foot_"+n, "shin_"+n, ankle, geom.V3{0, 0, 1}, -0.79, 0.61, footM,
-			geom.V3{0.5*(heel+toe), -0.035 * k, 0}, geom.V3{footM * 0.003 * k * k, footM * math.Pow(0.475*fl, 2), footM * math.Pow(0.45*fl, 2)})
-		for _, x := range []float64{heel, toe} {
-			for _, w := range []float64{-half, half} {
-				contacts(ankle.Add(geom.V3{x, -ah, w}))
+		mtpX := heel + 0.78*(toe-heel) // ball of the foot
+		midX := heel + 0.45*(toe-heel) // the arch hinge
+		sole := -ah
+		in := -z // towards the body's midline
+		padAll := func() {
+			l := &b.Links[len(b.Links)-1]
+			for i := range l.Contacts {
+				l.Sensors = append(l.Sensors, i)
 			}
 		}
+		// spring sets a foot joint's passive stiffness (N·m/rad) and its
+		// soft-tissue damping (N·m·s/rad).
+		spring := func(kNm, c float64) {
+			j := b.Links[len(b.Links)-1].Joint
+			j.Stiffness, j.Damping = kNm, c
+		}
+		link("foot_"+n, "shin_"+n, ankle, geom.V3{0, 0, 1}, -0.79, 0.61, 0.1*footM, geom.V3{}, small(0.1*footM))
+		invLo, invHi := -0.26, 0.52 // 15° eversion, 30° inversion (left: + turns the sole inwards)
+		if z > 0 {
+			invLo, invHi = -0.52, 0.26
+		}
+		hm, mm, tm := 0.4*footM, 0.35*footM, 0.15*footM
+		link("heel_"+n, "foot_"+n, ankle, geom.V3{1, 0, 0}, invLo, invHi, hm,
+			geom.V3{0.5 * (heel + midX), 0.6 * sole, 0}, box(hm, midX-heel, ah, 2*half))
+		spring(0.5*M, 0.05*M)
+		contacts(ankle.Add(geom.V3{heel, sole, -0.6 * half}), ankle.Add(geom.V3{heel, sole, 0.6 * half}), ankle.Add(geom.V3{midX - 0.02*k, sole, -in * half}))
+		padAll()
+		midO := ankle.Add(geom.V3{midX, sole + 0.04*k, 0}) // the arch peaks about 4 cm up
+		link("midfoot_"+n, "heel_"+n, midO, geom.V3{0, 0, 1}, -0.26, 0.17, mm,
+			geom.V3{0.5 * (mtpX - midX), -0.02 * k, 0}, box(mm, mtpX-midX, 0.035*k, 2*half))
+		spring(2.5*M, 0.4*M)
+		contacts(ankle.Add(geom.V3{mtpX - 0.01*k, sole, -half}), ankle.Add(geom.V3{mtpX - 0.01*k, sole, half}), ankle.Add(geom.V3{0.5 * (midX + mtpX), sole, -in * 0.9 * half}))
+		padAll()
+		mtpO := ankle.Add(geom.V3{mtpX, sole + 0.012*k, 0})
+		link("toes_"+n, "midfoot_"+n, mtpO, geom.V3{0, 0, 1}, -0.35, 1.05, tm,
+			geom.V3{0.5 * (toe - mtpX), -0.006 * k, 0}, box(tm, toe-mtpX, 0.02*k, 2*half))
+		spring(0.1*M, 0.02*M)
+		contacts(ankle.Add(geom.V3{toe, sole, -0.6 * half}), ankle.Add(geom.V3{toe, sole, 0.6 * half}), ankle.Add(geom.V3{mtpX + 0.025*k, sole, 0}))
+		padAll()
+		// Plantar fascia: heel, under the ball of the foot, to the toes.
+		// Bending the toes up winds it round the ball and lifts the arch
+		// (the windlass), so the foot stiffens for push-off by itself.
+		fascia := []Anchor{at("heel_"+n, ankle.Add(geom.V3{heel + 0.02*k, sole + 0.015*k, 0})),
+			at("midfoot_"+n, ankle.Add(geom.V3{mtpX, sole + 0.004*k, 0})),
+			at("toes_"+n, ankle.Add(geom.V3{mtpX + 0.025*k, sole + 0.004*k, 0}))}
+		tendons = append(tendons, Tendon{Name: "plantar_" + n, Path: fascia, Stiffness: 2e5 * M / 102.06, Damping: 300 * M / 102.06})
 
 		if s.HipYaw { // horizontal, front to back, 5 cm inside the yaw axis: its lever stays near 5 cm across the range
 			cyl("hip_yaw_"+n, at("pelvis", hip.Add(geom.V3{-0.20 * k, 0, -z * 0.05 * k})), at(mount, hip.Add(geom.V3{0.03 * k, 0, -z * 0.05 * k})), "hip_yaw_"+n, 80, 5)
@@ -287,7 +333,20 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 		if s.DoubleKnee {
 			cyl("knee_back_"+n, at("thigh_"+n, hip.Add(geom.V3{-0.03 * sl, -0.12 * th, 0})), at("shin_"+n, knee.Add(geom.V3{0.045 * ss, -0.035 * ss, 0})), "shin_"+n, 150, 8)
 		}
-		cyl("ankle_"+n, at("shin_"+n, knee.Add(geom.V3{-0.06 * ss, -0.22 * sh, 0})), at("foot_"+n, ankle.Add(geom.V3{-0.05 * sl, -0.01 * sl, 0})), "foot_"+n, 250, 8)
+		cyl("ankle_"+n, at("shin_"+n, knee.Add(geom.V3{-0.06 * ss, -0.22 * sh, 0})), at("heel_"+n, ankle.Add(geom.V3{-0.05 * sl, -0.01 * sl, 0})), "foot_"+n, 250, 8)
+		// Stirrup: a force-controlled cylinder on the back of the shin pulls
+		// a cable loop. One run passes behind the inner ankle bone to the
+		// inside of the heel, the other behind the outer one to the
+		// outside, so one valve tilts the sole either way and sets how
+		// firmly it is held (tibialis posterior and peroneus longus).
+		body0, body1 := at("shin_"+n, knee.Add(geom.V3{-0.05 * k, -0.25 * sh, 0})), at("shin_"+n, knee.Add(geom.V3{-0.05 * k, -0.55 * sh, 0}))
+		run := func(side float64) []Anchor {
+			return []Anchor{body1,
+				at("shin_"+n, ankle.Add(geom.V3{-0.02 * k, 0.03 * k, side * 0.035 * k})),
+				at("heel_"+n, ankle.Add(geom.V3{0.02 * k, -0.045 * k, side * 0.04 * k}))}
+		}
+		reqs = append(reqs, cylReq{name: "stirrup_" + n, base: body0, rod: body1, joint: "heel_" + n, torque: 80 * tq, speed: 6, pressure: true,
+			cables: []Cable{{Sign: 0.5, Path: run(in)}, {Sign: -0.5, Path: run(-in)}}})
 	}
 
 	// Spine: two erector cylinders behind the lumbar joint (together they
@@ -330,7 +389,7 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 				geom.V3{0, -0.396 * reach, 0}, geom.V3{faM * math.Pow(0.28*reach, 2), faM * math.Pow(0.025*k, 2), faM * math.Pow(0.28*reach, 2)})
 			contacts(elbow.Add(geom.V3{-0.04 * k, 0, 0}), // elbow tip
 				elbow.Add(geom.V3{0.035 * k, -0.4 * fa, 0}), elbow.Add(geom.V3{-0.035 * k, -0.4 * fa, 0}),
-				elbow.Add(geom.V3{0, -reach, 0}), // fingertips
+				elbow.Add(geom.V3{0, -reach, 0}),                                                                        // fingertips
 				elbow.Add(geom.V3{0.035 * k, -fa - 0.45*handL, 0}), elbow.Add(geom.V3{-0.035 * k, -fa - 0.45*handL, 0}), // palm, back of the hand
 				elbow.Add(geom.V3{0, -fa - 0.45*handL, z * 0.04 * k}))
 
@@ -341,7 +400,12 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 	}
 
 	for _, r := range reqs {
-		b.Cylinders = append(b.Cylinders, b.fitCylinder(r.name, r.base, r.rod, r.joint, r.torque, r.speed, P, rng))
+		c := Cylinder{Name: r.name, Base: r.base, Rod: r.rod, Cables: r.cables}
+		b.Cylinders = append(b.Cylinders, b.fitCylinder(c, r.joint, r.torque, r.speed, P, r.pressure, rng))
+	}
+	for _, t := range tendons {
+		t.RestLength = 0.998 * b.NeutralLength([]Cable{{Sign: 1, Path: t.Path}}) // a little pretension
+		b.Tendons = append(b.Tendons, t)
 	}
 	if rng != nil {
 		b.Name = fmt.Sprintf("random-human-%d", len(b.Cylinders))
@@ -364,14 +428,20 @@ func (b Body) frames(q []float64) ([]geom.V3, []geom.M3) {
 	return ps, rs
 }
 
-// cylLength is the pin-to-pin length of base–rod at joint angles q.
-func (b Body) cylLength(q []float64, base, rod Anchor) float64 {
+// routesLength is a cylinder's effective length at joint angles q.
+func (b Body) routesLength(q []float64, routes []Cable) float64 {
 	ps, rs := b.frames(q)
 	pa := func(a Anchor) geom.V3 {
 		i := b.LinkIndex(a.Link)
 		return ps[i].Add(rs[i].MulV(a.Point))
 	}
-	return pa(rod).Sub(pa(base)).Norm()
+	l := 0.0
+	for _, r := range routes {
+		for i := 1; i < len(r.Path); i++ {
+			l += r.Sign * pa(r.Path[i]).Sub(pa(r.Path[i-1])).Norm()
+		}
+	}
+	return l
 }
 
 // Spanned lists the links whose joints lie between two links in the tree.
@@ -415,8 +485,20 @@ func (b Body) Spanned(a, c string) []int {
 // its bore gives the wanted torque about joint from the rod side at
 // supply pressure P (at the neutral pose's moment arm), and its valve
 // moves that joint at speed rad/s when fully open.
-func (b Body) fitCylinder(name string, base, rod Anchor, joint string, torque, speed, P float64, rng *rand.Rand) Cylinder {
-	span := b.Spanned(base.Link, rod.Link)
+func (b Body) fitCylinder(c Cylinder, joint string, torque, speed, P float64, pressure bool, rng *rand.Rand) Cylinder {
+	routes := c.Routes()
+	var span []int
+	seen := map[int]bool{}
+	for _, r := range routes {
+		for _, a := range r.Path[1:] {
+			for _, i := range b.Spanned(r.Path[0].Link, a.Link) {
+				if !seen[i] {
+					seen[i] = true
+					span = append(span, i)
+				}
+			}
+		}
+	}
 	q := make([]float64, len(b.Links))
 	lo, hi := math.Inf(1), math.Inf(-1)
 	const samples = 12
@@ -429,7 +511,7 @@ func (b Body) fitCylinder(name string, base, rod Anchor, joint string, torque, s
 			lim := b.Links[span[i]].Joint.Limits
 			q[span[i]] = lim[0] + (lim[1]-lim[0])*float64(v%(samples+1))/samples
 		}
-		l := b.cylLength(q, base, rod)
+		l := b.routesLength(q, routes)
 		lo, hi = math.Min(lo, l), math.Max(hi, l)
 	}
 	for _, i := range span {
@@ -439,9 +521,9 @@ func (b Body) fitCylinder(name string, base, rod Anchor, joint string, torque, s
 	ji := b.LinkIndex(joint)
 	const eps = 1e-4
 	q[ji] = eps
-	lp := b.cylLength(q, base, rod)
+	lp := b.routesLength(q, routes)
 	q[ji] = -eps
-	lm := b.cylLength(q, base, rod)
+	lm := b.routesLength(q, routes)
 	q[ji] = 0
 	arm := math.Max(math.Abs(lp-lm)/(2*eps), 0.01)
 	jit := func(lo, hi float64) float64 {
@@ -455,16 +537,15 @@ func (b Body) fitCylinder(name string, base, rod Anchor, joint string, torque, s
 	v := speed * arm // m/s at full opening
 	gain := bore * v / math.Sqrt(P/2) * jit(0.7, 1.3)
 	margin := 0.003
-	return Cylinder{
-		Name: name, Base: base, Rod: rod,
-		RetractedLength: lo - margin,
-		Params: hydraulics.Params{
-			BoreArea: bore, RodArea: rodRatio * bore, Stroke: hi - lo + 2*margin,
-			DeadVolume: 3e-5 * jit(0.6, 1.6),
-			Viscous:    0.03 * P * bore / v * jit(0.5, 2),
-			ValveGain:  gain, ValveTau: 0.01 * jit(0.5, 2),
-		},
+	c.RetractedLength = lo - margin
+	c.Params = hydraulics.Params{
+		BoreArea: bore, RodArea: rodRatio * bore, Stroke: hi - lo + 2*margin,
+		DeadVolume: 3e-5 * jit(0.6, 1.6),
+		Viscous:    0.03 * P * bore / v * jit(0.5, 2),
+		ValveGain:  gain, ValveTau: 0.01 * jit(0.5, 2),
+		PressureControl: pressure,
 	}
+	return c
 }
 
 // Random draws a humanoid for morphology randomisation: height 1.55–1.95

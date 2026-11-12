@@ -194,35 +194,44 @@ func concat(xs ...[]float64) []float64 {
 	return out
 }
 
-// encoding is one pass of the two set encoders: body parts into a
-// body-shape context, then actuators into per-actuator embeddings and
-// their mean.
+// encoding is one pass of the set encoders: each context set (body
+// parts, sensors) into its pooled context, then actuators into
+// per-actuator embeddings and their mean.
 type encoding struct {
-	g        []float64
-	partActs [][][]float64
-	ph       [][]float64 // tanh part embeddings
-	g2       []float64   // global vector with the body-shape context appended
-	phiActs  [][][]float64
-	h        [][]float64 // tanh actuator embeddings
-	ctx      []float64   // their mean
+	g       []float64
+	sets    []setPass
+	g2      []float64 // global vector with the contexts appended
+	phiActs [][][]float64
+	h       [][]float64 // tanh actuator embeddings
+	ctx     []float64   // their mean
 }
 
-func encode(part, phi *MLP, E int, toks, parts [][]float64, g []float64) *encoding {
-	c := &encoding{g: g}
-	shape := make([]float64, E)
-	var ppre []float64
-	if len(parts) > 0 {
-		ppre = part.sharedPre(len(parts[0]), g)
-	}
-	for _, pt := range parts {
-		a := part.fwdWith(pt, ppre)
-		h := tanhOf(a[len(a)-1])
-		for j := range h {
-			shape[j] += h[j] / float64(len(parts))
+// setPass is one context set's forward pass.
+type setPass struct {
+	acts [][][]float64
+	h    [][]float64
+}
+
+func encode(nets []*MLP, rows [][][]float64, phi *MLP, E int, toks [][]float64, g []float64) *encoding {
+	c := &encoding{g: g, sets: make([]setPass, len(nets))}
+	g2 := append([]float64(nil), g...)
+	for s, net := range nets {
+		pool := make([]float64, E)
+		var pre []float64
+		if len(rows[s]) > 0 {
+			pre = net.sharedPre(len(rows[s][0]), g)
 		}
-		c.partActs, c.ph = append(c.partActs, a), append(c.ph, h)
+		for _, r := range rows[s] {
+			a := net.fwdWith(r, pre)
+			h := tanhOf(a[len(a)-1])
+			for j := range h {
+				pool[j] += h[j] / float64(len(rows[s]))
+			}
+			c.sets[s].acts, c.sets[s].h = append(c.sets[s].acts, a), append(c.sets[s].h, h)
+		}
+		g2 = append(g2, pool...)
 	}
-	c.g2 = concat(g, shape)
+	c.g2 = g2
 	c.ctx = make([]float64, E)
 	var tpre []float64
 	if len(toks) > 0 {
@@ -250,7 +259,7 @@ func tanhOf(x []float64) []float64 {
 // backward takes the loss gradient with respect to each actuator
 // embedding (dh, may be nil), their mean (dctx) and the extended global
 // vector (dg2), and accumulates the encoders' weight gradients.
-func (c *encoding) backward(part, phi, gPart, gPhi *MLP, E int, dh [][]float64, dctx, dg2 []float64) {
+func (c *encoding) backward(nets, gNets []*MLP, phi, gPhi *MLP, E int, dh [][]float64, dctx, dg2 []float64) {
 	dg2 = append([]float64(nil), dg2...)
 	n := float64(len(c.h))
 	if len(c.h) > 0 {
@@ -271,20 +280,23 @@ func (c *encoding) backward(part, phi, gPart, gPhi *MLP, E int, dh [][]float64, 
 			dg2[j] += v
 		}
 	}
-	if len(c.ph) == 0 {
-		return
-	}
-	dshape := dg2[len(dg2)-E:]
-	np := float64(len(c.ph))
-	dpre := make([]float64, part.Layers[0].Out)
-	for i, h := range c.ph {
-		de := make([]float64, E)
-		for j := range de {
-			de[j] = dshape[j] / np * (1 - h[j]*h[j])
+	for s, net := range nets {
+		sp := &c.sets[s]
+		if len(sp.h) == 0 {
+			continue
 		}
-		part.bwdWith(c.partActs[i], de, gPart, dpre)
+		dpool := dg2[len(c.g)+s*E : len(c.g)+(s+1)*E]
+		n := float64(len(sp.h))
+		dpre := make([]float64, net.Layers[0].Out)
+		for i, h := range sp.h {
+			de := make([]float64, E)
+			for j := range de {
+				de[j] = dpool[j] / n * (1 - h[j]*h[j])
+			}
+			net.bwdWith(sp.acts[i], de, gNets[s], dpre)
+		}
+		net.sharedBwd(len(sp.acts[0][0]), c.g, dpre, gNets[s])
 	}
-	part.sharedBwd(len(c.partActs[0][0]), c.g, dpre, gPart)
 }
 
 // DefaultLogStd is the initial exploration noise: σ ≈ 0.5 of full valve
@@ -297,18 +309,18 @@ func (p *SetPolicy) Std() float64 { return math.Exp(p.LogStd[0]) }
 // Clone returns a deep copy (zero = true gives a zeroed copy for
 // gradients, without input statistics).
 func (p *SetPolicy) Clone(zero bool) *SetPolicy {
-	c := &SetPolicy{ObsVersion: p.ObsVersion, TokenDim: p.TokenDim, PartDim: p.PartDim, GlobalDim: p.GlobalDim, Embed: p.Embed,
-		Part: p.Part.clone(zero), Phi: p.Phi.clone(zero), Rho: p.Rho.clone(zero), LogStd: []float64{0}}
+	c := &SetPolicy{ObsVersion: p.ObsVersion, TokenDim: p.TokenDim, PartDim: p.PartDim, SensorDim: p.SensorDim, GlobalDim: p.GlobalDim, Embed: p.Embed,
+		Part: p.Part.clone(zero), Sensor: p.Sensor.clone(zero), Phi: p.Phi.clone(zero), Rho: p.Rho.clone(zero), LogStd: []float64{0}}
 	if !zero {
 		c.LogStd[0] = p.LogStd[0]
-		c.TokNorm, c.PartNorm, c.GloNorm = p.TokNorm.clone(), p.PartNorm.clone(), p.GloNorm.clone()
+		c.TokNorm, c.PartNorm, c.SensNorm, c.GloNorm = p.TokNorm.clone(), p.PartNorm.clone(), p.SensNorm.clone(), p.GloNorm.clone()
 	}
 	return c
 }
 
 // Params lists every trainable array, in a fixed order shared by Clone.
 func (p *SetPolicy) Params() [][]float64 {
-	return append(append(append(p.Part.params(), p.Phi.params()...), p.Rho.params()...), p.LogStd)
+	return append(append(append(append(p.Part.params(), p.Sensor.params()...), p.Phi.params()...), p.Rho.params()...), p.LogStd)
 }
 
 // PolicyCache holds one forward pass for backpropagation.
@@ -322,7 +334,8 @@ type PolicyCache struct {
 // Forward returns the mean command per actuator and a cache for Backward.
 func (p *SetPolicy) Forward(o *Obs) *PolicyCache {
 	g := p.GloNorm.Apply(o.Global)
-	enc := encode(&p.Part, &p.Phi, p.Embed, p.TokNorm.applyAll(o.Tokens), p.PartNorm.applyAll(o.Parts), g)
+	enc := encode([]*MLP{&p.Part, &p.Sensor}, [][][]float64{p.PartNorm.applyAll(o.Parts), p.SensNorm.applyAll(o.Sensors)},
+		&p.Phi, p.Embed, p.TokNorm.applyAll(o.Tokens), g)
 	c := &PolicyCache{enc: enc, rho: make([][][]float64, len(enc.h)), Mu: make([]float64, len(enc.h))}
 	c.shared = concat(enc.ctx, enc.g2)
 	pre := p.Rho.sharedPre(p.Embed, c.shared)
@@ -345,7 +358,7 @@ func (p *SetPolicy) Backward(c *PolicyCache, dMu []float64, g *SetPolicy) {
 		dh[i] = p.Rho.bwdWith(c.rho[i], []float64{dm}, &g.Rho, dpre)
 	}
 	ds := p.Rho.sharedBwd(E, c.shared, dpre, &g.Rho)
-	c.enc.backward(&p.Part, &p.Phi, &g.Part, &g.Phi, E, dh, ds[:E], ds[E:])
+	c.enc.backward([]*MLP{&p.Part, &p.Sensor}, []*MLP{&g.Part, &g.Sensor}, &p.Phi, &g.Phi, E, dh, ds[:E], ds[E:])
 }
 
 // SetValue is the critic: the same two set encoders over the same tokens,
@@ -354,13 +367,16 @@ func (p *SetPolicy) Backward(c *PolicyCache, dMu []float64, g *SetPolicy) {
 type SetValue struct {
 	TokenDim  int         `json:"tokenDim"`
 	PartDim   int         `json:"partDim"`
+	SensorDim int         `json:"sensorDim"`
 	GlobalDim int         `json:"globalDim"` // including the privileged features
 	Embed     int         `json:"embed"`
 	Part      MLP         `json:"part"`
+	Sensor    MLP         `json:"sensor"`
 	Phi       MLP         `json:"phi"`
-	Rho       MLP         `json:"rho"` // [mean embedding, global, body shape] -> value
+	Rho       MLP         `json:"rho"` // [mean embedding, global, body shape, feel] -> value
 	TokNorm   *Normalizer `json:"tokNorm"`
 	PartNorm  *Normalizer `json:"partNorm"`
+	SensNorm  *Normalizer `json:"sensorNorm"`
 	GloNorm   *Normalizer `json:"globalNorm"`
 }
 
@@ -368,38 +384,41 @@ type SetValue struct {
 const ValueScale = 20
 
 // NewValue creates a critic; globalDim includes the privileged features.
-func NewValue(rng *rand.Rand, tokenDim, partDim, globalDim, embed, hidden int) *SetValue {
-	g2 := globalDim + embed
-	return &SetValue{TokenDim: tokenDim, PartDim: partDim, GlobalDim: globalDim, Embed: embed,
+func NewValue(rng *rand.Rand, tokenDim, partDim, sensorDim, globalDim, embed, hidden int) *SetValue {
+	g2 := globalDim + 2*embed
+	return &SetValue{TokenDim: tokenDim, PartDim: partDim, SensorDim: sensorDim, GlobalDim: globalDim, Embed: embed,
 		Part:    newMLP(rng, partDim+globalDim, hidden, embed),
+		Sensor:  newMLP(rng, sensorDim+globalDim, hidden, embed),
 		Phi:     newMLP(rng, tokenDim+g2, hidden, embed),
 		Rho:     newMLP(rng, embed+g2, hidden, 1),
-		TokNorm: NewNormalizer(tokenDim), PartNorm: NewNormalizer(partDim), GloNorm: NewNormalizer(globalDim)}
+		TokNorm: NewNormalizer(tokenDim), PartNorm: NewNormalizer(partDim), SensNorm: NewNormalizer(sensorDim), GloNorm: NewNormalizer(globalDim)}
 }
 
 func (v *SetValue) Clone(zero bool) *SetValue {
-	c := &SetValue{TokenDim: v.TokenDim, PartDim: v.PartDim, GlobalDim: v.GlobalDim, Embed: v.Embed,
-		Part: v.Part.clone(zero), Phi: v.Phi.clone(zero), Rho: v.Rho.clone(zero)}
+	c := &SetValue{TokenDim: v.TokenDim, PartDim: v.PartDim, SensorDim: v.SensorDim, GlobalDim: v.GlobalDim, Embed: v.Embed,
+		Part: v.Part.clone(zero), Sensor: v.Sensor.clone(zero), Phi: v.Phi.clone(zero), Rho: v.Rho.clone(zero)}
 	if !zero {
-		c.TokNorm, c.PartNorm, c.GloNorm = v.TokNorm.clone(), v.PartNorm.clone(), v.GloNorm.clone()
+		c.TokNorm, c.PartNorm, c.SensNorm, c.GloNorm = v.TokNorm.clone(), v.PartNorm.clone(), v.SensNorm.clone(), v.GloNorm.clone()
 	}
 	return c
 }
 
 func (v *SetValue) Params() [][]float64 {
-	return append(append(v.Part.params(), v.Phi.params()...), v.Rho.params()...)
+	return append(append(append(v.Part.params(), v.Sensor.params()...), v.Phi.params()...), v.Rho.params()...)
 }
 
 // UpdateNorms folds a batch of observations into the input statistics.
 func (v *SetValue) UpdateNorms(batch []*Obs) {
-	var toks, parts, globs [][]float64
+	var toks, parts, sens, globs [][]float64
 	for _, o := range batch {
 		toks = append(toks, o.Tokens...)
 		parts = append(parts, o.Parts...)
+		sens = append(sens, o.Sensors...)
 		globs = append(globs, concat(o.Global, o.Priv))
 	}
 	v.TokNorm.Update(toks)
 	v.PartNorm.Update(parts)
+	v.SensNorm.Update(sens)
 	v.GloNorm.Update(globs)
 }
 
@@ -411,7 +430,8 @@ type ValueCache struct {
 
 func (v *SetValue) Forward(o *Obs) *ValueCache {
 	g := v.GloNorm.Apply(concat(o.Global, o.Priv))
-	enc := encode(&v.Part, &v.Phi, v.Embed, v.TokNorm.applyAll(o.Tokens), v.PartNorm.applyAll(o.Parts), g)
+	enc := encode([]*MLP{&v.Part, &v.Sensor}, [][][]float64{v.PartNorm.applyAll(o.Parts), v.SensNorm.applyAll(o.Sensors)},
+		&v.Phi, v.Embed, v.TokNorm.applyAll(o.Tokens), g)
 	c := &ValueCache{enc: enc}
 	c.rho = v.Rho.fwd(concat(enc.ctx, enc.g2))
 	c.V = ValueScale * c.rho[len(c.rho)-1][0]
@@ -423,7 +443,7 @@ func (v *SetValue) Forward(o *Obs) *ValueCache {
 func (v *SetValue) Backward(c *ValueCache, dV float64, g *SetValue) {
 	din := v.Rho.bwd(c.rho, []float64{dV * ValueScale}, &g.Rho)
 	E := v.Embed
-	c.enc.backward(&v.Part, &v.Phi, &g.Part, &g.Phi, E, nil, din[:E], din[E:])
+	c.enc.backward([]*MLP{&v.Part, &v.Sensor}, []*MLP{&g.Part, &g.Sensor}, &v.Phi, &g.Phi, E, nil, din[:E], din[E:])
 }
 
 // Adam is the Adam optimiser over a fixed list of parameter arrays.

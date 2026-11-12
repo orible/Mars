@@ -1,0 +1,49 @@
+@page "/3d"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<PageTitle>Mars observer · 3D</PageTitle>
+
+<header class="bar">
+    <h1>Mars observer · 3D</h1>
+    <input @bind="url" class="url" aria-label="Simulator WebSocket URL" />
+    <button @onclick="Connect">Connect</button>
+    <span class="status" @ref="status">idle</span>
+    <a class="nav" href="/">2D view</a>
+</header>
+
+<canvas @ref="canvas" class="view" width="1100" height="760"></canvas>
+
+@code {
+    private ElementReference canvas;
+    private ElementReference status;
+    private IJSObjectReference? module;
+    private string url = "ws://localhost:8080/ws";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        module = await JS.InvokeAsync<IJSObjectReference>("import", "./orbit.js");
+        await Connect();
+    }
+
+    private async Task Connect()
+    {
+        if (module is null) return;
+        await module.InvokeVoidAsync("connect", url, canvas, status);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (module is null) return;
+        try
+        {
+            await module.InvokeVoidAsync("disconnect");
+            await module.DisposeAsync();
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+}

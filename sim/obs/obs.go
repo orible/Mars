@@ -6,7 +6,10 @@
 // the joints it spans. Part tokens are the network's sense of its own
 // shape: each part's length and extent, its share of the mass, where it
 // is and how it is oriented and moving, and how much of the weight it
-// carries on the floor.
+// carries on the floor. Sensor tokens are what the feet feel: each sole
+// pad's place on its foot and in the body, its pressure, how close it is
+// to slipping (shear over pressure), the shear's direction and how fast
+// it is sliding; and each tendon's tension.
 //
 // Positions are expressed in the heading frame: centred on the centre of
 // gravity (or the pelvis), with gravity's up axis and the pelvis's forward
@@ -30,18 +33,20 @@ import (
 
 // Version is the feature layout. Checkpoints record it, and one trained
 // on another layout is refused.
-const Version = 2
+const Version = 3
 
 // Feature sizes.
 const (
-	TokenDim  = 19
+	TokenDim  = 20
 	PartDim   = 19
+	SensorDim = 11
 	GlobalDim = 19
 	// MaxArms is how many of a cylinder's joints (largest lever first)
 	// go into its token.
 	MaxArms = 2
 	// PartMinMass is the share of the body's mass below which a link (a
-	// joint bracket) is not a part of its own.
+	// joint bracket) is not a part of its own, unless it touches the floor
+	// (a heel, the toes).
 	PartMinMass = 0.01
 )
 
@@ -107,6 +112,10 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 		}
 		b := rel(m.Point(ps, c.BaseLink, c.Base))
 		r := rel(m.Point(ps, c.RodLink, c.Rod))
+		force := 0.0
+		if c.P.PressureControl {
+			force = 1
+		}
 		o.Tokens[k] = []float64{
 			st.X/c.P.Stroke*2 - 1,
 			st.V / (0.5 * L),
@@ -119,6 +128,7 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 			r[0], r[1], r[2],
 			tq[0][0], tq[0][1], tq[0][2],
 			tq[1][0], tq[1][1], tq[1][2],
+			force,
 		}
 	}
 
@@ -141,6 +151,7 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 		extend(m.Parent[i], m.Origin[i])
 	}
 	load := make([]float64, n)
+	touches := make([]bool, n)
 	low := make([]float64, n)
 	for i := range low {
 		low[i] = math.Inf(1)
@@ -149,6 +160,7 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 	totalLoad := 0.0
 	for c, ct := range m.Contacts {
 		extend(ct.Link, ct.Point)
+		touches[ct.Link] = true
 		y := m.Point(ps, ct.Link, ct.Point)[1]
 		low[ct.Link] = math.Min(low[ct.Link], y)
 		floor = math.Min(floor, y)
@@ -160,7 +172,7 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 		com := m.Point(ps, i, m.Com[i])
 		v := m.PointVelocity(ps, w.Base.V, w.Base.W, w.Qd, i, com)
 		cogV = cogV.Add(v.Scale(m.Mass[i] / mass))
-		if m.Mass[i] < PartMinMass*mass {
+		if m.Mass[i] < PartMinMass*mass && !touches[i] {
 			continue
 		}
 		if math.IsInf(low[i], 1) {
@@ -181,6 +193,43 @@ func Build(w *model.World, imu IMU, cmd command.Command) *policy.Obs {
 			ext[0], ext[1], ext[2],
 			math.Min(1, load[i]/weight),
 			(low[i] - floor) / L,
+		})
+	}
+
+	// Sensors: sole pads, then tendons.
+	for _, sn := range m.Sensors {
+		ct := m.Contacts[sn.Contact]
+		p := m.Point(ps, ct.Link, ct.Point)
+		f := w.ContactF[sn.Contact]
+		fn := math.Max(0, f[1])
+		sh := h.MulV(geom.V3{f[0], 0, f[2]}).Scale(10 / weight)
+		ratio, slip := 0.0, 0.0
+		if fn > 0 {
+			ratio = math.Min(2, math.Hypot(f[0], f[2])/fn)
+			v := m.PointVelocity(ps, w.Base.V, w.Base.W, w.Qd, ct.Link, p)
+			slip = math.Min(2, math.Hypot(v[0], v[2])/vs)
+		}
+		r := rel(p)
+		o.Sensors = append(o.Sensors, []float64{
+			r[0], r[1], r[2],
+			sn.Local[0] / L, sn.Local[2] / L,
+			10 * fn / weight,
+			ratio,
+			sh[0], sh[2],
+			slip,
+			0,
+		})
+	}
+	for t := range m.Tendons {
+		pts := m.RoutePoints(ps, t, true)[0]
+		mid := pts[0].Add(pts[len(pts)-1]).Scale(0.5)
+		r := rel(mid)
+		o.Sensors = append(o.Sensors, []float64{
+			r[0], r[1], r[2],
+			0, 0,
+			10 * w.TendonT[t] / weight,
+			0, 0, 0, 0,
+			1,
 		})
 	}
 
@@ -215,6 +264,7 @@ func maxV(a, b geom.V3) geom.V3 {
 var (
 	tokenFlip  = []int{9, 12, 13, 14, 16, 17}
 	partFlip   = []int{2, 5, 8, 11}
+	sensorFlip = []int{2, 4, 8}
 	globalFlip = []int{3, 5, 6, 7, 10, 18}
 )
 
@@ -229,7 +279,11 @@ func Mirror(o *policy.Obs) *policy.Obs {
 		}
 		return y
 	}
-	out := &policy.Obs{Tokens: make([][]float64, len(o.Tokens)), Parts: make([][]float64, len(o.Parts)), Global: flip(o.Global, globalFlip)}
+	out := &policy.Obs{Tokens: make([][]float64, len(o.Tokens)), Parts: make([][]float64, len(o.Parts)),
+		Sensors: make([][]float64, len(o.Sensors)), Global: flip(o.Global, globalFlip)}
+	for i, s := range o.Sensors {
+		out.Sensors[i] = flip(s, sensorFlip)
+	}
 	for i, t := range o.Tokens {
 		out.Tokens[i] = flip(t, tokenFlip)
 	}
