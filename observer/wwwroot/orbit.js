@@ -1,7 +1,8 @@
 // 3D orbit view of the robot: every link, joint axis, anchor, cylinder
 // (barrel coloured by its cap-side pressure, rod by its rod-side
 // pressure), cable run and tendon (coloured by tension), sole pad
-// (coloured by pressure) and ground force, drawn with a small perspective
+// (coloured by pressure), collision capsule (tinted by the force on it),
+// self-contact and ground force, drawn with a small perspective
 // renderer on a 2D canvas (no libraries, works offline).
 //
 // Drag to orbit, right-drag or shift-drag to pan, wheel to zoom, F to
@@ -16,6 +17,7 @@ let statusEl = null;
 const cam = { yaw: -2.3, pitch: 0.3, dist: 3.4, target: [0, 0.9, 0], follow: true };
 let mouse = null; // last pointer position on the canvas
 let drag = null;
+let showColliders = true;
 
 export function connect(url, canvas, status) {
   disconnect();
@@ -83,6 +85,7 @@ function bindInput(canvas) {
   }, { passive: false });
   window.addEventListener("keydown", (e) => {
     if (e.key === "f" || e.key === "F") cam.follow = true;
+    if (e.key === "c" || e.key === "C") showColliders = !showColliders;
   });
 }
 
@@ -155,6 +158,14 @@ function draw(canvas, f) {
   const poly = (pts, color, width, info, dash) => {
     for (let i = 1; i < pts.length; i++) line(pts[i - 1], pts[i], color, width, info, dash);
   };
+  // A capsule is a translucent round-capped stroke as wide as it looks at
+  // its depth; it sorts slightly behind what sits on its axis.
+  const capsule = (a, b, r, color, info) => {
+    const pa = proj(a), pb = proj(b);
+    if (!pa || !pb) return;
+    const px = focal * r * (1 / pa.z + 1 / pb.z);
+    prims.push({ kind: "capsule", pa, pb, z: (pa.z + pb.z) / 2 + r, px, color, info });
+  };
 
   // Floor grid (follows the floor's bumps).
   const grid = css("--grid"), g0 = 0.25, span = 3;
@@ -188,6 +199,20 @@ function draw(canvas, f) {
     ball(l.origin, 3.5, text, info);
     ball(l.com, 2 + Math.sqrt(l.mass) * 0.8, muted, info, true);
   });
+
+  // Collision capsules, tinted by the force on them (floor and each
+  // other), and where two of them touch. C hides them.
+  if (showColliders) {
+    for (const c of f.colliders || []) {
+      const info = { title: `${c.link} collider`, rows: [`radius ${(1000 * c.r).toFixed(0)} mm · length ${(1000 * norm(sub(c.b, c.a))).toFixed(0)} mm`, `pressed ${c.f.toFixed(0)} N`] };
+      capsule(c.a, c.b, c.r, c.f > 1 ? heat(c.f / (0.5 * weight)) : muted, info);
+    }
+    for (const h of f.hits || []) {
+      const info = { title: "self-contact", rows: [`${norm(h.f).toFixed(0)} N`] };
+      ball(h.p, 4, css("--warn"), info, true);
+      line(h.p, add(h.p, scale(h.f, 0.6 / weight)), css("--warn"), 1.5, info);
+    }
+  }
 
   // Cylinders: barrel (cap side) from the base pin, rod from the rod pin.
   for (const c of f.cylinders) {
@@ -246,7 +271,18 @@ function draw(canvas, f) {
   for (const p of prims) {
     const w = (p.width || 1) * Math.min(2.5, 3 / p.z);
     ctx.setLineDash(p.dash || []);
-    if (p.kind === "line") {
+    if (p.kind === "capsule") {
+      ctx.strokeStyle = p.color;
+      ctx.globalAlpha = 0.22;
+      ctx.lineWidth = Math.max(2, p.px);
+      ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(p.pa.x, p.pa.y); ctx.lineTo(p.pb.x, p.pb.y); ctx.stroke();
+      ctx.globalAlpha = 1;
+      if (mouse && p.info) {
+        const d = segDist(mouse, p.pa, p.pb) - p.px / 2 + 8; // anything on top of it wins
+        if (d < best) { best = d; hit = p.info; }
+      }
+    } else if (p.kind === "line") {
       ctx.strokeStyle = p.color;
       ctx.lineWidth = Math.max(1, w);
       ctx.lineCap = "round";
@@ -282,8 +318,8 @@ function legend(ctx, f, W, H, text, muted) {
   ctx.font = "12px system-ui, sans-serif";
   ctx.fillStyle = muted;
   const lines = [
-    `${f.body} · ${f.links.length} links · ${f.cylinders.length} cylinders · ${(f.tendons || []).length} tendons · t ${f.t.toFixed(1)} s`,
-    "drag: orbit · right/shift-drag: pan · wheel: zoom · F: follow · hover: details",
+    `${f.body} · ${f.links.length} links · ${f.cylinders.length} cylinders · ${(f.tendons || []).length} tendons · ${(f.colliders || []).length} colliders · t ${f.t.toFixed(1)} s`,
+    "drag: orbit · right/shift-drag: pan · wheel: zoom · F: follow · C: colliders · hover: details",
   ];
   lines.forEach((s, i) => ctx.fillText(s, 14, 20 + 16 * i));
   const x0 = 14, y0 = H - 34, w = 200;

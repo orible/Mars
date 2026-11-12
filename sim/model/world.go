@@ -13,7 +13,22 @@ var Gravity = geom.V3{0, -9.81, 0}
 const (
 	endStopK = 2e5 // N/m, cylinder end stop stiffness
 	endStopC = 500 // N·s/m
+
+	// Self-collision between capsules: a spring-damper along the line
+	// between their axes (scaled with the body like the floor) and sliding
+	// friction, viscous up to selfMu times the normal force.
+	selfK  = 3e4 // N/m
+	selfC  = 200 // N·s/m
+	selfCt = 100 // N·s/m
+	selfMu = 0.5
 )
+
+// SelfHit is one capsule pair in contact: the point midway through their
+// overlap and the force on the second capsule (the first gets −F).
+type SelfHit struct {
+	A, B int // capsule indices
+	P, F geom.V3
+}
 
 // Joint limits are stiff mechanical stops (Model.LimitK), so a knee at its
 // extension stop (a few degrees past straight, as in a human knee) locks:
@@ -112,7 +127,13 @@ type World struct {
 	DLdq     [][]float64
 	Pose     *Pose
 	ContactF []geom.V3 // last ground force on each contact point (world)
-	T        float64
+	// CapA and CapB are each capsule's ends in the world for the current
+	// pose; ProbeF is the last ground force on each floor probe, and
+	// SelfHits the capsule pairs touching each other on the last step.
+	CapA, CapB []geom.V3
+	ProbeF     []geom.V3
+	SelfHits   []SelfHit
+	T          float64
 	// MassEvery is how many steps reuse one factored mass matrix. Inertia
 	// changes slowly next to the 50 µs pressure and contact dynamics, and
 	// rebuilding it is most of the cost of a step.
@@ -128,6 +149,8 @@ type World struct {
 	massAge int
 	anchor  []geom.V3 // stick point of each touching contact
 	touch   []bool
+	pAnchor []geom.V3 // the same for the floor probes
+	pTouch  []bool
 	nb      int // 6 when floating, else 0
 	gen     []float64
 	bias    []float64
@@ -154,6 +177,9 @@ func NewWorld(m *Model, floating bool) *World {
 		Pose:     m.NewPose(),
 		ContactF: make([]geom.V3, len(m.Contacts)),
 		anchor:   make([]geom.V3, len(m.Contacts)), touch: make([]bool, len(m.Contacts)),
+		CapA: make([]geom.V3, len(m.Capsules)), CapB: make([]geom.V3, len(m.Capsules)),
+		ProbeF:  make([]geom.V3, len(m.Probes)),
+		pAnchor: make([]geom.V3, len(m.Probes)), pTouch: make([]bool, len(m.Probes)),
 		nb:  nb,
 		gen: make([]float64, nb+n), bias: make([]float64, nb+n), acc: make([]float64, nb+n),
 		nu: make([]float64, nb+n), nud: make([]float64, nb+n),
@@ -203,6 +229,10 @@ func (w *World) Place(r geom.M3, q []float64, x, z float64) {
 		p := w.Pose.P[i]
 		lo = math.Min(lo, p[1]-w.Ground.Height(p[0]+x-w.Pose.P[0][0], p[2]+z-w.Pose.P[0][2]))
 	}
+	for _, pr := range m.Probes {
+		p := m.Point(w.Pose, m.Capsules[pr.Capsule].Link, pr.C)
+		lo = math.Min(lo, p[1]-m.Capsules[pr.Capsule].R-w.Ground.Height(p[0]+x-w.Pose.P[0][0], p[2]+z-w.Pose.P[0][2]))
+	}
 	w.Base.P = geom.V3{x, 0.005 - lo, z}
 	w.refresh()
 	for k, c := range m.Cyl {
@@ -212,20 +242,30 @@ func (w *World) Place(r geom.M3, q []float64, x, z float64) {
 	for i := range w.touch {
 		w.touch[i], w.ContactF[i] = false, geom.V3{}
 	}
+	for i := range w.pTouch {
+		w.pTouch[i], w.ProbeF[i] = false, geom.V3{}
+	}
+	w.SelfHits = w.SelfHits[:0]
 	w.Harness = Harness{}
 }
 
-// StandHeight is the pelvis height at which the lowest contact point
-// touches the ground in the neutral pose (1 m if there are no contacts).
+// StandHeight is the pelvis height at which the lowest contact point or
+// collider touches the ground in the neutral pose (1 m if there are
+// neither).
 func (w *World) StandHeight() float64 {
-	if len(w.M.Contacts) == 0 {
+	m := w.M
+	if len(m.Contacts) == 0 && len(m.Probes) == 0 {
 		return 1
 	}
-	ps := w.M.NewPose()
-	w.M.FK(make([]float64, w.M.NDof()), ps)
+	ps := m.NewPose()
+	m.FK(make([]float64, m.NDof()), ps)
 	lo := math.Inf(1)
-	for _, c := range w.M.Contacts {
-		lo = math.Min(lo, w.M.Point(ps, c.Link, c.Point)[1])
+	for _, c := range m.Contacts {
+		lo = math.Min(lo, m.Point(ps, c.Link, c.Point)[1])
+	}
+	for _, pr := range m.Probes {
+		c := m.Capsules[pr.Capsule]
+		lo = math.Min(lo, m.Point(ps, c.Link, pr.C)[1]-c.R)
 	}
 	return -lo
 }
@@ -242,6 +282,9 @@ func (w *World) refresh() {
 	for t := range w.M.Tendons {
 		w.TendonLen[t] = w.M.TendonLength(w.Pose, t, w.tdLdq[t])
 	}
+	for k, c := range w.M.Capsules {
+		w.CapA[k], w.CapB[k] = w.M.Point(w.Pose, c.Link, c.A), w.M.Point(w.Pose, c.Link, c.B)
+	}
 }
 
 // LengthRate returns cylinder k's extension speed in m/s.
@@ -253,33 +296,87 @@ func (w *World) LengthRate(k int) float64 {
 	return s
 }
 
-// contacts adds ground forces to w.gen and records them in ContactF.
+// contacts adds ground forces on the contact points and the collider
+// probes to w.gen and records them in ContactF and ProbeF.
 func (w *World) contacts() {
-	m, g := w.M, w.Ground
+	m := w.M
 	for i, c := range m.Contacts {
-		p := m.Point(w.Pose, c.Link, c.Point)
-		h := g.Height(p[0], p[2])
-		if p[1] >= h {
-			w.touch[i], w.ContactF[i] = false, geom.V3{}
+		w.ContactF[i] = w.floor(c.Link, m.Point(w.Pose, c.Link, c.Point), &w.touch[i], &w.anchor[i])
+	}
+	for i, pr := range m.Probes {
+		c := m.Capsules[pr.Capsule]
+		p := m.Point(w.Pose, c.Link, pr.C)
+		p[1] -= c.R // the sphere's lowest point
+		w.ProbeF[i] = w.floor(c.Link, p, &w.pTouch[i], &w.pAnchor[i])
+	}
+}
+
+// floor applies the ground's force at world point p on link l, a compliant
+// spring-damper normally and a stick–slip spring tangentially (see
+// Ground), and returns it. touch and anchor are the point's stick state.
+func (w *World) floor(l int, p geom.V3, touch *bool, anchor *geom.V3) geom.V3 {
+	m, g := w.M, w.Ground
+	h := g.Height(p[0], p[2])
+	if p[1] >= h {
+		*touch = false
+		return geom.V3{}
+	}
+	v := m.PointVelocity(w.Pose, w.Base.V, w.Base.W, w.Qd, l, p)
+	fn := math.Max(0, -g.K*(p[1]-h)-g.C*v[1])
+	if !*touch {
+		*touch, *anchor = true, geom.V3{p[0], h, p[2]}
+	}
+	ft := geom.V3{
+		-g.Kt*(p[0]-anchor[0]) - g.Ct*v[0], 0,
+		-g.Kt*(p[2]-anchor[2]) - g.Ct*v[2],
+	}
+	if mag, lim := ft.Norm(), g.MuAt(p[0], p[2])*fn; mag > lim {
+		// Slipping: limit to the cone and drag the anchor along.
+		ft = ft.Scale(lim / mag)
+		*anchor = geom.V3{p[0] + ft[0]/g.Kt, h, p[2] + ft[2]/g.Kt}
+	}
+	f := geom.V3{ft[0], fn, ft[2]}
+	m.AddPointForce(w.Pose, l, p, f, w.Floating, w.gen)
+	return f
+}
+
+// selfCollide pushes apart every colliding capsule pair that overlaps and
+// records them in SelfHits.
+func (w *World) selfCollide() {
+	m := w.M
+	w.SelfHits = w.SelfHits[:0]
+	for _, pr := range m.Pairs {
+		i, j := pr[0], pr[1]
+		ci, cj := &m.Capsules[i], &m.Capsules[j]
+		// Cheap reject: the spheres round each capsule's midpoint that hold it.
+		mi, mj := w.CapA[i].Add(w.CapB[i]).Scale(0.5), w.CapA[j].Add(w.CapB[j]).Scale(0.5)
+		reach := 0.5*(w.CapB[i].Sub(w.CapA[i]).Norm()+w.CapB[j].Sub(w.CapA[j]).Norm()) + ci.R + cj.R
+		if d := mj.Sub(mi); d.Dot(d) > reach*reach {
 			continue
 		}
-		v := m.PointVelocity(w.Pose, w.Base.V, w.Base.W, w.Qd, c.Link, p)
-		fn := math.Max(0, -g.K*(p[1]-h)-g.C*v[1])
-		if !w.touch[i] {
-			w.touch[i], w.anchor[i] = true, geom.V3{p[0], h, p[2]}
+		p, q := geom.SegmentClosest(w.CapA[i], w.CapB[i], w.CapA[j], w.CapB[j])
+		d := q.Sub(p)
+		dist := d.Norm()
+		over := ci.R + cj.R - dist
+		if over <= 0 {
+			continue
 		}
-		ft := geom.V3{
-			-g.Kt*(p[0]-w.anchor[i][0]) - g.Ct*v[0], 0,
-			-g.Kt*(p[2]-w.anchor[i][2]) - g.Ct*v[2],
+		n := geom.V3{0, 1, 0} // axes crossing exactly: any direction will do
+		if dist > 1e-9 {
+			n = d.Scale(1 / dist)
 		}
-		if mag, lim := ft.Norm(), g.MuAt(p[0], p[2])*fn; mag > lim {
-			// Slipping: limit to the cone and drag the anchor along.
+		x := p.Add(n.Scale(ci.R - over/2))
+		rel := m.PointVelocity(w.Pose, w.Base.V, w.Base.W, w.Qd, cj.Link, x).Sub(m.PointVelocity(w.Pose, w.Base.V, w.Base.W, w.Qd, ci.Link, x))
+		vn := rel.Dot(n)
+		fn := math.Max(0, w.stiff*(selfK*over-selfC*vn))
+		ft := rel.Sub(n.Scale(vn)).Scale(-w.stiff * selfCt)
+		if mag, lim := ft.Norm(), selfMu*fn; mag > lim {
 			ft = ft.Scale(lim / mag)
-			w.anchor[i] = geom.V3{p[0] + ft[0]/g.Kt, h, p[2] + ft[2]/g.Kt}
 		}
-		f := geom.V3{ft[0], fn, ft[2]}
-		w.ContactF[i] = f
-		m.AddPointForce(w.Pose, c.Link, p, f, w.Floating, w.gen)
+		f := n.Scale(fn).Add(ft)
+		m.AddPointForce(w.Pose, cj.Link, x, f, w.Floating, w.gen)
+		m.AddPointForce(w.Pose, ci.Link, x, f.Scale(-1), w.Floating, w.gen)
+		w.SelfHits = append(w.SelfHits, SelfHit{A: i, B: j, P: x, F: f})
 	}
 }
 
@@ -333,6 +430,9 @@ func (w *World) Step(dt float64) {
 		w.massAge = max(1, w.MassEvery)
 	}
 	w.massAge--
+	if len(m.Pairs) > 0 {
+		w.selfCollide()
+	}
 	if w.Floating {
 		w.contacts()
 		w.harness(dt)

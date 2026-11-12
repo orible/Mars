@@ -142,6 +142,17 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 			l.Contacts = append(l.Contacts, p.Sub(origin[l.Name]))
 		}
 	}
+	// collide gives a link a capsule between two neutral pelvis-frame points.
+	collide := func(name string, pa, pb geom.V3, r float64) {
+		l := &b.Links[b.LinkIndex(name)]
+		l.Colliders = append(l.Colliders, Capsule{A: pa.Sub(origin[name]), B: pb.Sub(origin[name]), Radius: r})
+	}
+	// Collider sizes. Hanging arms clear the trunk and thighs by 1.5 cm:
+	// nothing below the shoulders reaches further out than armIn.
+	rUpperArm, rForearm := 0.04*k, 0.035*k
+	armIn := sw - rForearm - 0.015*k
+	rThigh := math.Max(0.03*k, math.Min(0.06*k, armIn-hw))
+	rShin := math.Min(0.045*k, rThigh)
 
 	// Trunk: whatever the spine leaves rigid is lumped together.
 	trunkParts := map[int][]part{0: {pelvisP}}
@@ -213,6 +224,13 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 		contacts(chestContacts...)
 		trunk = "chest"
 	}
+	// Trunk colliders: a pelvis and a belly capsule across the body, the
+	// rib cage and a head sphere, on whichever links the spine has.
+	belly := map[bool]string{true: "pelvis", false: "abdomen"}[s.Spine == 0]
+	collide("pelvis", geom.V3{-0.01 * k, -0.06 * k, -(armIn - 0.10*k)}, geom.V3{-0.01 * k, -0.06 * k, armIn - 0.10*k}, 0.10*k)
+	collide(belly, geom.V3{0, 0.55 * abd, -(armIn - 0.10*k)}, geom.V3{0, 0.55 * abd, armIn - 0.10*k}, 0.10*k)
+	collide(trunk, T.Add(geom.V3{0.01 * k, 0.13 * k, -0.06 * k}), T.Add(geom.V3{0.01 * k, 0.13 * k, 0.06 * k}), 0.12*k)
+	collide(trunk, T.Add(geom.V3{0.02 * k, cs + 0.23*k, 0}), T.Add(geom.V3{0.02 * k, cs + 0.23*k, 0}), hr)
 
 	type cylReq struct {
 		name      string
@@ -319,6 +337,15 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 			at("midfoot_"+n, ankle.Add(geom.V3{mtpX, sole + 0.004*k, 0})),
 			at("toes_"+n, ankle.Add(geom.V3{mtpX + 0.025*k, sole + 0.004*k, 0}))}
 		tendons = append(tendons, Tendon{Name: "plantar_" + n, Path: fascia, Stiffness: 2e5 * M / 102.06, Damping: 300 * M / 102.06})
+		// Leg colliders: thigh and shin down the bones (the shin's stops
+		// short of the ankle so a bent ankle does not press it into the
+		// midfoot), and the heel and arch 1 cm above the sole, so standing
+		// is on the sole pads alone and the capsules keep the feet apart.
+		collide("thigh_"+n, hip, knee, rThigh)
+		collide("shin_"+n, knee, ankle.Add(geom.V3{0, 0.03 * k, 0}), rShin)
+		rh, rm := 0.025*k, 0.022*k
+		collide("heel_"+n, ankle.Add(geom.V3{heel + rh, sole + rh + 0.01*k, 0}), ankle.Add(geom.V3{midX, sole + rh + 0.01*k, 0}), rh)
+		collide("midfoot_"+n, ankle.Add(geom.V3{midX, sole + rm + 0.01*k, 0}), ankle.Add(geom.V3{mtpX, sole + rm + 0.01*k, 0}), rm)
 
 		if s.HipYaw {
 			// Horizontal, across the pelvis: from the front of the far side
@@ -406,6 +433,8 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 				elbow.Add(geom.V3{0, -reach, 0}),                                                                        // fingertips
 				elbow.Add(geom.V3{0.035 * k, -fa - 0.45*handL, 0}), elbow.Add(geom.V3{-0.035 * k, -fa - 0.45*handL, 0}), // palm, back of the hand
 				elbow.Add(geom.V3{0, -fa - 0.45*handL, z * 0.04 * k}))
+			collide("upper_arm_"+n, sh, elbow, rUpperArm)
+			collide("forearm_"+n, elbow, elbow.Add(geom.V3{0, -(reach - rForearm), 0}), rForearm)
 
 			cyl("shoulder_pitch_"+n, at(trunk, sh.Add(geom.V3{0.066 * ra, 0.046 * ra, 0})), at("upper_arm_"+n, sh.Add(geom.V3{0.093 * ra, -0.96 * ua, 0})), "shoulder_"+n, 110, 8)
 			cyl("shoulder_roll_"+n, at(trunk, sh.Add(geom.V3{0, -0.007 * ra, -z * 0.059 * ra})), at("upper_arm_"+n, sh.Add(geom.V3{0, -0.64 * ua, -z * 0.053 * ra})), "upper_arm_"+n, 90, 8)

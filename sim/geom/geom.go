@@ -78,6 +78,40 @@ func AxisAngle(axis V3, ang float64) M3 {
 	return r
 }
 
+// SegmentClosest returns the closest points c1 on segment p1–q1 and c2 on
+// segment p2–q2 (Ericson, Real-Time Collision Detection, 5.1.9). Either
+// segment may be a single point.
+func SegmentClosest(p1, q1, p2, q2 V3) (c1, c2 V3) {
+	d1, d2, r := q1.Sub(p1), q2.Sub(p2), p1.Sub(p2)
+	a, e, f := d1.Dot(d1), d2.Dot(d2), d2.Dot(r)
+	clamp := func(x float64) float64 { return math.Max(0, math.Min(1, x)) }
+	const eps = 1e-12
+	var s, t float64
+	switch {
+	case a <= eps && e <= eps:
+		return p1, p2
+	case a <= eps:
+		t = clamp(f / e)
+	default:
+		c := d1.Dot(r)
+		if e <= eps {
+			s = clamp(-c / a)
+		} else {
+			b := d1.Dot(d2)
+			if den := a*e - b*b; den > eps {
+				s = clamp((b*f - c*e) / den)
+			}
+			t = (b*s + f) / e
+			if t < 0 {
+				t, s = 0, clamp(-c/a)
+			} else if t > 1 {
+				t, s = 1, clamp((b-c)/a)
+			}
+		}
+	}
+	return p1.Add(d1.Scale(s)), p2.Add(d2.Scale(t))
+}
+
 // InertiaMul returns (R·diag(d)·Rᵀ)·v: a body-frame principal inertia d,
 // rotated into the world by R, applied to the world vector v.
 func InertiaMul(r M3, d, v V3) V3 {

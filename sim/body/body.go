@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 
 	"mars/sim/geom"
@@ -50,6 +51,20 @@ type Link struct {
 	// Sensors lists the contacts (indices into Contacts) that carry a
 	// pressure sensor, such as the pads on a sole.
 	Sensors []int `json:"sensors,omitempty"`
+	// Colliders are the link's solid volume as capsules. They rest on the
+	// floor like contacts do, and keep limbs from passing through each
+	// other: every two links' capsules collide, except a link's and its
+	// collision parent's (see SelfCollisionPairs), which meet at the joint
+	// between them.
+	Colliders []Capsule `json:"colliders,omitempty"`
+}
+
+// Capsule is the segment A–B swept by a sphere of Radius, in the link
+// frame (metres). A == B makes a sphere.
+type Capsule struct {
+	A      geom.V3 `json:"a"`
+	B      geom.V3 `json:"b"`
+	Radius float64 `json:"radius"`
 }
 
 // Anchor is a pin position on a link, in that link's frame.
@@ -142,6 +157,80 @@ func (b Body) ZeroPosition(a Anchor) geom.V3 {
 	return p
 }
 
+// CollisionParent returns the index of link i's nearest ancestor that has
+// colliders, or -1. Light brackets between two limbs (a hip's yaw and
+// roll links) usually have none, so a thigh's collision parent is the
+// pelvis.
+func (b Body) CollisionParent(i int) int {
+	for p := b.LinkIndex(b.Links[i].Parent); p >= 0; p = b.LinkIndex(b.Links[p].Parent) {
+		if len(b.Links[p].Colliders) > 0 {
+			return p
+		}
+		if p == 0 {
+			break
+		}
+	}
+	return -1
+}
+
+// SelfCollisionPairs lists the link pairs (lower index first) whose
+// capsules collide with each other: every two links with colliders except
+// a link and its collision parent, whose capsules overlap round the
+// joint between them.
+func (b Body) SelfCollisionPairs() [][2]int {
+	var out [][2]int
+	for i := range b.Links {
+		if len(b.Links[i].Colliders) == 0 {
+			continue
+		}
+		for j := i + 1; j < len(b.Links); j++ {
+			if len(b.Links[j].Colliders) == 0 || b.CollisionParent(j) == i || b.CollisionParent(i) == j {
+				continue
+			}
+			out = append(out, [2]int{i, j})
+		}
+	}
+	return out
+}
+
+// ZeroCapsule returns capsule c of link l in the pelvis frame in the
+// neutral pose.
+func (b Body) ZeroCapsule(l string, c Capsule) (geom.V3, geom.V3) {
+	return b.ZeroPosition(Anchor{l, c.A}), b.ZeroPosition(Anchor{l, c.B})
+}
+
+// validateColliders checks capsule sizes and that no two colliding
+// capsules overlap in the neutral pose (they would push the body apart
+// the moment it starts).
+func (b Body) validateColliders() error {
+	for _, l := range b.Links {
+		for k, c := range l.Colliders {
+			ok := c.Radius > 0 && c.Radius < 1
+			for i := 0; i < 3; i++ {
+				ok = ok && !math.IsNaN(c.A[i]+c.B[i]) && !math.IsInf(c.A[i]+c.B[i], 0)
+			}
+			if !ok {
+				return fmt.Errorf("link %q: collider %d needs finite ends and a radius between 0 and 1 m", l.Name, k)
+			}
+		}
+	}
+	for _, pr := range b.SelfCollisionPairs() {
+		li, lj := b.Links[pr[0]], b.Links[pr[1]]
+		for ki, ci := range li.Colliders {
+			a1, b1 := b.ZeroCapsule(li.Name, ci)
+			for kj, cj := range lj.Colliders {
+				a2, b2 := b.ZeroCapsule(lj.Name, cj)
+				p, q := geom.SegmentClosest(a1, b1, a2, b2)
+				if over := ci.Radius + cj.Radius - q.Sub(p).Norm(); over > 0 {
+					return fmt.Errorf("link %q collider %d and link %q collider %d overlap by %.1f mm in the neutral pose; shrink or move one (only a link and its collision parent may overlap)",
+						li.Name, ki, lj.Name, kj, over*1000)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Validate rejects specs the simulator cannot run, and pelvis or limb
 // geometries in which a cylinder cannot be assembled in the neutral pose.
 func (b Body) Validate() error {
@@ -184,6 +273,9 @@ func (b Body) Validate() error {
 			}
 		}
 		seen[l.Name] = true
+	}
+	if err := b.validateColliders(); err != nil {
+		return err
 	}
 	if len(b.Cylinders) == 0 {
 		return errors.New("body needs at least one cylinder")

@@ -94,6 +94,22 @@ type ContactFrame struct {
 	Pad bool `json:"pad,omitempty"`
 }
 
+// ColliderFrame is one collision capsule in the world: its axis, radius,
+// and the force pressing on it (floor and other capsules together).
+type ColliderFrame struct {
+	Link string  `json:"link"`
+	A    geom.V3 `json:"a"`
+	B    geom.V3 `json:"b"`
+	R    float64 `json:"r"`
+	F    float64 `json:"f"` // N
+}
+
+// HitFrame is two capsules touching: where, and the force between them.
+type HitFrame struct {
+	P geom.V3 `json:"p"`
+	F geom.V3 `json:"f"` // on the second capsule, N
+}
+
 type Frame struct {
 	T         float64        `json:"t"`
 	BodyName  string         `json:"body"`
@@ -111,6 +127,8 @@ type Frame struct {
 	Cylinders []CylFrame     `json:"cylinders"`
 	Contacts  []ContactFrame `json:"contacts"`
 	Tendons   []TendonFrame  `json:"tendons"`
+	Colliders []ColliderFrame `json:"colliders"`
+	Hits      []HitFrame      `json:"hits"`
 	Floor     []model.Wave   `json:"floor,omitempty"` // floor bumps (flat when empty)
 	// Command loop: what the LLM (or its stand-in) was told and said.
 	Objective *world.XZ       `json:"objective"`
@@ -447,6 +465,19 @@ func (s *sim) frame() Frame {
 	}
 	for i, c := range m.Contacts {
 		f.Contacts = append(f.Contacts, ContactFrame{P: m.Point(w.Pose, c.Link, c.Point), F: w.ContactF[i], Pad: pads[i]})
+	}
+	f.Colliders, f.Hits = []ColliderFrame{}, []HitFrame{}
+	load := make([]float64, len(m.Capsules))
+	for i, pr := range m.Probes {
+		load[pr.Capsule] += w.ProbeF[i].Norm()
+	}
+	for _, h := range w.SelfHits {
+		load[h.A] += h.F.Norm()
+		load[h.B] += h.F.Norm()
+		f.Hits = append(f.Hits, HitFrame{P: h.P, F: h.F})
+	}
+	for k, c := range m.Capsules {
+		f.Colliders = append(f.Colliders, ColliderFrame{Link: m.Names[c.Link], A: w.CapA[k], B: w.CapB[k], R: c.R, F: load[k]})
 	}
 	for t, tn := range m.Tendons {
 		f.Tendons = append(f.Tendons, TendonFrame{Name: tn.Name, Path: m.RoutePoints(w.Pose, t, true)[0], Tension: w.TendonT[t]})

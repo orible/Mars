@@ -25,7 +25,8 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 | `training` | Snapshot of the training data (checkpoints and run logs) that git carries between machines |
 | `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec and the policy checkpoint, streams frames on `ws://localhost:8080/ws` |
 | `sim/bodies` | Body specs; edit these as hardware measurements come in |
-| `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG; a 3D orbit view at `/3d` with every link, joint axis, anchor, cylinder (by chamber pressure), cable, tendon (by tension) and sole pad (by load) |
+| `tools/blender` | Blender add-on: import a body spec as an armature with pins, contacts and collision capsules, edit it, export it back |
+| `observer` | Blazor Server app: side and front views, cylinder pressures and valve commands, CoG; a 3D orbit view at `/3d` with every link, joint axis, anchor, cylinder (by chamber pressure), cable, tendon (by tension), sole pad (by load) and collision capsule |
 
 ## Set up
 
@@ -70,7 +71,48 @@ cd sim && go run ./cmd/bodygen -out bodies/biped.json
 cd sim && go run ./cmd/bodygen -height 1.65 -mass 70 -arms=false
 ```
 
-The old 0.6 m, 6 kg robot is kept as `bodies/biped-small.json`. Random training bodies are humanoids of 1.55–1.95 m and a BMI of 20–33. Some have no arms, a shorter or rigid spine, no hip yaw or roll, or a second knee cylinder.
+**Collision.** Contact points (`contacts`) touch the floor. Each link can also have `colliders`, capsules given as two link-frame points and a radius in metres:
+
+```json
+"colliders": [{ "a": [0, 0, 0], "b": [0, -0.4356, 0], "radius": 0.05 }]
+```
+
+Capsules rest on the floor, using the same spring-damper and stick–slip model as the contact points. They also collide with each other, so legs and arms can't pass through each other. The exception is a link and its *collision parent* (its nearest ancestor that has capsules, so a thigh's is the pelvis, skipping the hip brackets): those two meet at their joint and never collide. Validation rejects any other pair that already overlaps in the neutral pose. The human template has capsules on the pelvis, belly, rib cage, head, thighs, shins, heels, arches, upper arms and forearms. The heel and arch capsules sit 1 cm above the sole, so the robot stands on its pads. The left and right sides are exact mirror images, which training's symmetry loss relies on. Press C in the 3D view to show or hide the capsules (tinted by the force on them) and self-contacts.
+
+The old 0.6 m, 6 kg robot is kept as `bodies/biped-small.json`.
+
+### Editing the body in Blender
+
+`tools/blender/mars_body.py` is a Blender 4.x add-on that turns the spec into something you can see and drag around. It's good for catching misplaced cylinder pins (like hip-yaw bases outside the pelvis) and for shaping collision capsules.
+
+1. Install it: Edit › Preferences › Add-ons › Install…, choose `tools/blender/mars_body.py`, then tick "Mars body spec".
+2. Import with File › Import › Mars body spec (.json), and pick `sim/bodies/biped.json`. You get the body in its neutral pose (all joints at 0), standing on Blender's floor:
+   - an armature with one bone per link (its head is the joint centre);
+   - an empty for every cylinder pin (`cyl.knee_l.rod`), cable point, tendon point and contact point (`contact.heel_l.0`), each parented to its link's bone;
+   - a wire capsule for every collider (`collider.thigh_r.0`);
+   - a line through each cylinder's pins that follows the armature when you pose it.
+
+   Each bone carries its joint axis, limits, damping, stiffness, mass, CoM and inertia as custom properties (`mars_*`, in sim units and the sim frame). They're also shown in the 3D view's sidebar under the Mars tab.
+3. Edit:
+   - Move pins and contacts.
+   - Move, rotate or scale capsules: Z scale changes the length, X/Y scale the radius. Mars › Apply capsule scale rebuilds the mesh at its new size.
+   - Duplicate a contact or capsule to add one, or delete it to remove it.
+   - Re-parent a point to another bone, in the rest pose, to move it to that link.
+   - Add a capsule along a bone with Mars › Add capsule to bone.
+   - Move bones in Edit Mode to move joints. Whatever is parented to a bone moves with it.
+
+   Pose the armature to check clearances through a joint's range. Export always reads the rest pose.
+4. Export with File › Export › Mars body spec (.json), which defaults to the imported file. Every point is written in its link's own frame. Everything the add-on doesn't edit (hydraulics, tendons, supply, cylinder sizes) is copied unchanged. A value that moved by less than 0.01 mm keeps its exact original number, so exporting with no edits reproduces the file byte for byte, and an edit changes only what you touched. A running `simserver` reloads the file within a second. If it rejects the spec (an overlapping capsule, or a cylinder that no longer fits its stroke), it logs why and keeps the previous body. Run `go run ./cmd/simserver -check` for the full reach report.
+
+Coordinates: the sim has X forward, Y up and Z to the robot's right. A Blender character faces −Y with Z up and its right side at −X, so sim (x, y, z) is Blender (−z, −x, y), and Blender (X, Y, Z) is sim (−Y, Z, −X). That's a rotation, not a mirror. Structural changes (adding links or cylinders, cylinder sizing) still go through `bodygen` or the JSON. Note that `bodygen` regenerates `biped.json` from the template and overwrites Blender edits.
+
+Tests: `sim/body/blender_test.go` checks the mapping and the float32 round-trip arithmetic in Go. The add-on's own round trip runs in Blender (import, export, posed export, one edited pin, one scaled capsule):
+
+```bash
+blender -b --factory-startup -P tools/blender/test_roundtrip.py -- sim/bodies/biped.json
+```
+
+Plain Python (`python tools/blender/test_roundtrip.py`) checks the Go-style JSON writer and the mapping only. Random training bodies are humanoids of 1.55–1.95 m and a BMI of 20–33. Some have no arms, a shorter or rigid spine, no hip yaw or roll, or a second knee cylinder.
 
 ## Run
 

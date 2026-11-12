@@ -1,11 +1,11 @@
 // Package model compiles a body spec into a 3D articulated model:
 // forward kinematics, cylinder lengths and their gradients with respect to
-// every joint, and inverse dynamics (recursive Newton–Euler).
+// every joint, and inverse dynamics (recursive Newtonâ€“Euler).
 //
-// Joint i (i ≥ 1) moves link i relative to its parent; its coordinate is
+// Joint i (i â‰¥ 1) moves link i relative to its parent; its coordinate is
 // q[i-1]. Link 0 is the pelvis, which is either bolted to the world (test
 // stand) or free (floating base). With a floating base the generalised
-// velocity is ν = [v, ω, q̇]: the world velocity of the pelvis frame
+// velocity is Î½ = [v, Ï‰, qÌ‡]: the world velocity of the pelvis frame
 // origin, the pelvis angular velocity in the world, then the joint rates.
 // The matching generalised forces are [force, moment about the pelvis
 // origin, joint torques].
@@ -59,9 +59,9 @@ type Sensor struct {
 }
 
 // limitOmega sets each joint stop's stiffness from the inertia it stops:
-// k = ω²·I, so a toe and a hip both bounce off their stops at about
+// k = Ï‰Â²Â·I, so a toe and a hip both bounce off their stops at about
 // 95 Hz: stiff enough to hold a cylinder pushing into them, stable for the
-// lightest toe at 50 µs steps (ω·dt = 0.03), and gentle enough on the
+// lightest toe at 50 Âµs steps (Ï‰Â·dt = 0.03), and gentle enough on the
 // reused mass matrix (MassEvery) to keep momentum drift small.
 const limitOmega = 600 // rad/s
 
@@ -86,6 +86,13 @@ type Model struct {
 	Sensors                   []Sensor
 	Supply   hydraulics.Supply
 	Contacts []Contact
+	// Capsules are every link's colliders. Probes are spheres along them
+	// that rest on the floor (a capsule lying flat touches it along its
+	// length), and Pairs are the capsule pairs that collide with each
+	// other (see body.SelfCollisionPairs).
+	Capsules []Capsule
+	Probes   []Probe
+	Pairs    [][2]int
 
 	moves [][]bool // moves[l][j]: rotating joint j moves link l
 
@@ -98,6 +105,30 @@ type Model struct {
 type Contact struct {
 	Link  int
 	Point geom.V3 // in the link frame
+}
+
+// Capsule is a compiled collider: segment Aâ€“B on Link (link frame) swept
+// by R.
+type Capsule struct {
+	Link int
+	A, B geom.V3
+	R    float64
+}
+
+// Probe is a sphere on a capsule's axis that collides with the floor.
+type Probe struct {
+	Capsule int
+	C       geom.V3 // centre in the link frame
+}
+
+// probesPer is how many floor spheres a capsule of length l and radius r
+// gets: its two ends, plus enough between that the floor never sinks more
+// than about a sixth of the radius into the gap between two of them.
+func probesPer(l, r float64) int {
+	if l < 1e-9 {
+		return 1
+	}
+	return min(8, 2+int(l/r))
 }
 
 // New validates and compiles a body.
@@ -129,6 +160,29 @@ func New(b body.Body) (*Model, error) {
 		}
 		for _, p := range l.Contacts {
 			m.Contacts = append(m.Contacts, Contact{Link: i, Point: p})
+		}
+	}
+	capFirst := make([]int, n) // each link's first capsule
+	for i, l := range b.Links {
+		capFirst[i] = len(m.Capsules)
+		for _, c := range l.Colliders {
+			k := len(m.Capsules)
+			m.Capsules = append(m.Capsules, Capsule{Link: i, A: c.A, B: c.B, R: c.Radius})
+			np := probesPer(c.B.Sub(c.A).Norm(), c.Radius)
+			for s := 0; s < np; s++ {
+				t := 0.0
+				if np > 1 {
+					t = float64(s) / float64(np-1)
+				}
+				m.Probes = append(m.Probes, Probe{Capsule: k, C: c.A.Add(c.B.Sub(c.A).Scale(t))})
+			}
+		}
+	}
+	for _, pr := range b.SelfCollisionPairs() {
+		for ki := range b.Links[pr[0]].Colliders {
+			for kj := range b.Links[pr[1]].Colliders {
+				m.Pairs = append(m.Pairs, [2]int{capFirst[pr[0]] + ki, capFirst[pr[1]] + kj})
+			}
 		}
 	}
 	compile := func(c body.Cable) route {
@@ -190,7 +244,7 @@ func New(b body.Body) (*Model, error) {
 		m.LimitK[l], m.LimitC[l] = limitOmega*limitOmega*in, limitOmega*in
 	}
 	// Sensors: a pad's root is found by climbing from its link while the
-	// parent carries no plain (sensorless) contacts: heel → talus bracket,
+	// parent carries no plain (sensorless) contacts: heel â†’ talus bracket,
 	// stopping below the shin.
 	plain := make([]bool, n)
 	first := make([]int, n) // index of each link's first contact
@@ -255,8 +309,8 @@ func (m *Model) Point(ps *Pose, link int, pt geom.V3) geom.V3 {
 }
 
 // CylLength returns cylinder k's pin-to-pin length. If dLdq is non-nil it
-// receives ∂L/∂q for each joint in the cylinder's Span; a cylinder force F
-// (positive pushing the pins apart) produces joint torque F·∂L/∂q, so these
+// receives âˆ‚L/âˆ‚q for each joint in the cylinder's Span; a cylinder force F
+// (positive pushing the pins apart) produces joint torque FÂ·âˆ‚L/âˆ‚q, so these
 // are the cylinder's signed moment arms in the current pose.
 func (m *Model) CylLength(ps *Pose, k int, dLdq []float64) float64 {
 	return m.routeLength(ps, m.Cyl[k].Routes, m.Cyl[k].Span, dLdq)
@@ -322,14 +376,14 @@ func (m *Model) routeLength(ps *Pose, rs []route, span []int, dLdq []float64) fl
 }
 
 // RNEA computes the joint torques needed to produce accelerations qdd at
-// velocities qd under gravity g (recursive Newton–Euler, world frame),
+// velocities qd under gravity g (recursive Newtonâ€“Euler, world frame),
 // with the pelvis fixed.
 func (m *Model) RNEA(ps *Pose, qd, qdd []float64, g geom.V3, tau []float64) {
 	m.rnea(ps, geom.V3{}, geom.V3{}, geom.V3{}, qd, qdd, g, tau)
 }
 
 // RNEAFloating is RNEA for a free pelvis: nu and nud are generalised
-// velocity and acceleration ([v, ω, q̇] and its derivative) and gen
+// velocity and acceleration ([v, Ï‰, qÌ‡] and its derivative) and gen
 // receives the 6+NDof generalised forces that produce them.
 func (m *Model) RNEAFloating(ps *Pose, nu, nud []float64, g geom.V3, gen []float64) {
 	w0 := geom.V3{nu[3], nu[4], nu[5]}
@@ -340,7 +394,7 @@ func (m *Model) RNEAFloating(ps *Pose, nu, nud []float64, g geom.V3, gen []float
 	copy(gen[3:6], n0[:])
 }
 
-// rnea runs Newton–Euler with the pelvis moving at angular velocity w0,
+// rnea runs Newtonâ€“Euler with the pelvis moving at angular velocity w0,
 // angular acceleration al0 and origin acceleration a0. It writes joint
 // torques to tau and returns the force and the moment about the pelvis
 // origin that the pelvis must receive.
@@ -374,14 +428,14 @@ func (m *Model) rnea(ps *Pose, w0, al0, a0 geom.V3, qd, qdd []float64, g geom.V3
 	return m.f[0], m.n[0]
 }
 
-// MassMatrixFloating fills M ((6+NDof)×(6+NDof)) for a free pelvis.
+// MassMatrixFloating fills M ((6+NDof)Ã—(6+NDof)) for a free pelvis.
 func (m *Model) MassMatrixFloating(ps *Pose, M [][]float64) { m.crba(ps, M, 6) }
 
-// MassMatrix fills M (NDof×NDof) for pose ps with the pelvis fixed.
+// MassMatrix fills M (NDofÃ—NDof) for pose ps with the pelvis fixed.
 func (m *Model) MassMatrix(ps *Pose, M [][]float64) { m.crba(ps, M, 0) }
 
 // spatialInertia is a rigid body (or a composite of several) about the
-// pelvis origin, in world axes: mass, first moment h = m·c and the
+// pelvis origin, in world axes: mass, first moment h = mÂ·c and the
 // rotational inertia J about the pelvis origin.
 type spatialInertia struct {
 	m float64
@@ -398,9 +452,9 @@ func (a *spatialInertia) apply(w, v geom.V3) (geom.V3, geom.V3) {
 
 // crba fills the mass matrix with the composite rigid body algorithm:
 // every entry is one joint's motion dotted with the momentum of the
-// subtree below the other joint, so it costs O(links × depth) instead of
-// one Newton–Euler pass per column. nb is 6 for a free pelvis (rows and
-// columns 0–5 are the pelvis origin's linear and angular motion), else 0.
+// subtree below the other joint, so it costs O(links Ã— depth) instead of
+// one Newtonâ€“Euler pass per column. nb is 6 for a free pelvis (rows and
+// columns 0â€“5 are the pelvis origin's linear and angular motion), else 0.
 func (m *Model) crba(ps *Pose, M [][]float64, nb int) {
 	n := len(m.Names)
 	if len(m.comp) != n {
@@ -473,7 +527,7 @@ func (m *Model) crba(ps *Pose, M [][]float64, nb int) {
 	}
 }
 
-// massMatrixFloatingRNEA is MassMatrixFloating by one Newton–Euler pass
+// massMatrixFloatingRNEA is MassMatrixFloating by one Newtonâ€“Euler pass
 // per column: slow, kept as the reference the tests check crba against.
 func (m *Model) massMatrixFloatingRNEA(ps *Pose, M [][]float64) {
 	nd := m.NDof()
@@ -554,13 +608,13 @@ func (m *Model) CoG(ps *Pose) (geom.V3, float64) {
 	return s.Scale(1 / mass), mass
 }
 
-// solveSPD solves A·x = b in place (b becomes x) by Cholesky; A is overwritten.
+// solveSPD solves AÂ·x = b in place (b becomes x) by Cholesky; A is overwritten.
 func solveSPD(A [][]float64, b []float64) {
 	cholesky(A)
 	cholSolve(A, b)
 }
 
-// cholesky overwrites the lower triangle of A with L, where A = L·Lᵀ.
+// cholesky overwrites the lower triangle of A with L, where A = LÂ·Láµ€.
 func cholesky(A [][]float64) {
 	n := len(A)
 	for j := 0; j < n; j++ {
@@ -580,7 +634,7 @@ func cholesky(A [][]float64) {
 	}
 }
 
-// cholSolve solves L·Lᵀ·x = b in place for a factor from cholesky.
+// cholSolve solves LÂ·Láµ€Â·x = b in place for a factor from cholesky.
 func cholSolve(A [][]float64, b []float64) {
 	n := len(b)
 	for i := 0; i < n; i++ {

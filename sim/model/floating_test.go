@@ -196,7 +196,7 @@ func TestLyingSettles(t *testing.T) {
 			lowest = math.Min(lowest, w.Pose.P[i][1])
 		}
 		load := 0.0
-		for _, f := range w.ContactF {
+		for _, f := range append(w.ContactF, w.ProbeF...) {
 			load += f[1]
 		}
 		_, mass := w.CoG()
