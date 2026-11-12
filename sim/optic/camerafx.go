@@ -42,6 +42,14 @@ func DefaultSensor() SensorConfig {
 		WBError: 0.04, Sharpen: 0.35, Quality: 70}
 }
 
+// FastSensor is DefaultSensor cut down for vision inside the RL loop:
+// two blur taps, no chromatic aberration, sharpening or compression.
+func FastSensor() SensorConfig {
+	c := DefaultSensor()
+	c.BlurTaps, c.ChromAb, c.Sharpen, c.Quality = 2, 0, 0, 0
+	return c
+}
+
 // Exposure is the auto-exposure state the two eyes of a rig share (stereo
 // modules sync exposure so both eyes see the same brightness).
 type Exposure struct {
@@ -70,13 +78,13 @@ type Sensor struct {
 	prnu, dsnu []float32
 	wb         [3]float32
 	rng        *rand.Rand
-	a, b       []RGB // scratch
+	a, b, c    []RGB // scratch
 }
 
 // NewSensor makes a w×h sensor; the seed fixes its fixed-pattern noise.
 func NewSensor(cfg SensorConfig, w, h int, seed int64) *Sensor {
 	s := &Sensor{Cfg: cfg, W: w, H: h, rng: rand.New(rand.NewSource(seed)),
-		prnu: make([]float32, w*h*3), dsnu: make([]float32, w*h*3), a: make([]RGB, w*h), b: make([]RGB, w*h)}
+		prnu: make([]float32, w*h*3), dsnu: make([]float32, w*h*3), a: make([]RGB, w*h), b: make([]RGB, w*h), c: make([]RGB, w*h)}
 	for i := range s.prnu {
 		s.prnu[i] = 1 + cfg.PRNU*float32(s.rng.NormFloat64())
 		s.dsnu[i] = cfg.DSNU * float32(s.rng.NormFloat64())
@@ -135,7 +143,10 @@ func (s *Sensor) Optics(rad []RGB, back []Flow, out []RGB) {
 	cx, cy := float32(w)/2, float32(h)/2
 	rmax := float32(math.Hypot(float64(cx), float64(cy)))
 	ab := s.b
-	for y := 0; y < h; y++ {
+	if c.ChromAb == 0 {
+		copy(ab, tmp)
+	}
+	for y := 0; y < h && c.ChromAb != 0; y++ {
 		for x := 0; x < w; x++ {
 			k := y*w + x
 			px, py := float32(x)+0.5-cx, float32(y)+0.5-cy
@@ -145,7 +156,7 @@ func (s *Sensor) Optics(rad []RGB, back []Flow, out []RGB) {
 			ab[k] = RGB{red[0], tmp[k][1], blue[2]}
 		}
 	}
-	gaussBlur(ab, out, w, h, c.PSF)
+	gaussBlur(ab, out, s.c, w, h, c.PSF)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			px, py := (float32(x)+0.5)/float32(w)-0.5, (float32(y)+0.5)/float32(h)-0.5
@@ -171,8 +182,9 @@ func (s *Sensor) Capture(img []RGB, gain float32, out []RGB) {
 		for ch := 0; ch < 3; ch++ {
 			x := v[ch] * gain * s.wb[ch]
 			el := float32(math.Max(0, float64(x*e*s.prnu[3*k+ch])))
-			el += float32(math.Sqrt(float64(el))) * float32(s.rng.NormFloat64())
-			el += c.ReadNoise*float32(s.rng.NormFloat64()) + s.dsnu[3*k+ch]
+			// Shot and read noise together: one Gaussian of variance
+			// el + read².
+			el += float32(math.Sqrt(float64(el+c.ReadNoise*c.ReadNoise)))*float32(s.rng.NormFloat64()) + s.dsnu[3*k+ch]
 			q := float32(math.Round(float64(clamp01(el/e) * levels)))
 			o[ch] = q / levels
 		}
@@ -184,7 +196,7 @@ func (s *Sensor) Capture(img []RGB, gain float32, out []RGB) {
 		}
 	}
 	if c.Sharpen > 0 {
-		gaussBlur(out, s.a, s.W, s.H, 1)
+		gaussBlur(out, s.a, s.c, s.W, s.H, 1)
 		for k := range out {
 			for ch := 0; ch < 3; ch++ {
 				out[k][ch] = clamp01(out[k][ch] + c.Sharpen*(out[k][ch]-s.a[k][ch]))
@@ -231,7 +243,7 @@ var srgbLUT = func() (t [srgbN]float32) {
 func luma(c RGB) float32 { return 0.2126*c[0] + 0.7152*c[1] + 0.0722*c[2] }
 
 // gaussBlur is a separable Gaussian of std sigma (radius 2σ, at least 1).
-func gaussBlur(src, dst []RGB, w, h int, sigma float32) {
+func gaussBlur(src, dst, tmp []RGB, w, h int, sigma float32) {
 	if sigma <= 0 {
 		copy(dst, src)
 		return
@@ -246,7 +258,6 @@ func gaussBlur(src, dst []RGB, w, h int, sigma float32) {
 	for i := range k {
 		k[i] /= sum
 	}
-	tmp := make([]RGB, w*h)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			var a RGB

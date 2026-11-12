@@ -271,7 +271,7 @@ func blurF(p []float32, w, h int, sigma float32) []float32 {
 		in[k] = RGB{v, v, v}
 	}
 	out := make([]RGB, len(p))
-	gaussBlur(in, out, w, h, sigma)
+	gaussBlur(in, out, make([]RGB, len(p)), w, h, sigma)
 	r := make([]float32, len(p))
 	for k := range out {
 		r[k] = out[k][0]

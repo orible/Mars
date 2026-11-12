@@ -144,6 +144,10 @@ type Object struct {
 	// Motion, if set, gives the pose at time t (s); Scene.At applies it.
 	Motion func(t float64) (geom.M3, geom.V3)
 	Static bool // never casts shadows or occludes the sun (the floor)
+	// Self marks the robot's own body; Link is then the model link the
+	// object rides on (its frame is the link frame).
+	Self bool
+	Link int
 }
 
 // Scene is the floor, walls and objects, plus lighting.
@@ -160,6 +164,18 @@ type Scene struct {
 	SunJitter []geom.V3
 }
 
+// Clone copies the scene so another environment can move its objects
+// independently; meshes, textures and appearance vectors are shared.
+func (s *Scene) Clone() *Scene {
+	c := *s
+	c.Objects = make([]*Object, len(s.Objects))
+	for i, o := range s.Objects {
+		oc := *o
+		c.Objects[i] = &oc
+	}
+	return &c
+}
+
 // At moves every animated object to its pose at time t.
 func (s *Scene) At(t float64) {
 	for _, o := range s.Objects {
@@ -170,7 +186,7 @@ func (s *Scene) At(t float64) {
 }
 
 // AppearanceVectors draws a unit prototype per kind and gives each object
-// its prototype plus a small private perturbation (cosine ≈ 0.95 within a
+// that has no vector yet its prototype plus a small private perturbation (cosine ≈ 0.95 within a
 // kind, ≈ 0 across kinds).
 func (s *Scene) AppearanceVectors(rng *rand.Rand, spread float64) {
 	protos := map[int][]float64{}
@@ -193,6 +209,9 @@ func (s *Scene) AppearanceVectors(rng *rand.Rand, spread float64) {
 		return v
 	}
 	for _, o := range s.Objects {
+		if o.Appearance != nil {
+			continue
+		}
 		p, ok := protos[o.Kind]
 		if !ok {
 			p = unit(gauss())

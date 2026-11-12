@@ -313,3 +313,140 @@ func BenchmarkStereoFrame(b *testing.B) {
 	b.ReportMetric(tm.Realism.Seconds()*1000/n, "realism-ms")
 	b.ReportMetric(tm.Camera.Seconds()*1000/n, "camera-ms")
 }
+
+func BenchmarkStereoFrameSmall(b *testing.B) {
+	s := DefaultScene(1)
+	rig := DefaultRig()
+	rig.W, rig.H = 64, 48
+	p := NewPipeline(s, rig, 1)
+	for i := 0; i < b.N; i++ {
+		r, e := lookPose(0.02*float64(i%50), 0, 0.01*float64(i%50), 0.15)
+		p.Step(r, e, 0.05*float64(i))
+	}
+	tm := p.Timing
+	n := float64(tm.Frames)
+	b.ReportMetric(tm.Render.Seconds()*1000/n, "render-ms")
+	b.ReportMetric(tm.Truth.Seconds()*1000/n, "truth-ms")
+	b.ReportMetric(tm.Realism.Seconds()*1000/n, "realism-ms")
+	b.ReportMetric(tm.Camera.Seconds()*1000/n, "camera-ms")
+}
+
+func BenchmarkEyesFast(b *testing.B) {
+	m, _ := model.New(body.Human(body.DefaultHuman()))
+	w := model.NewWorld(m, true)
+	e := NewEyes(DefaultScene(1), m, FastProfile(), 1)
+	for i := 0; i < b.N; i++ {
+		t := 0.05 * float64(i)
+		ScriptedWalk(w, t, 0.5+0.5*math.Sin(0.7*t))
+		e.Step(w, t)
+	}
+	tm := e.Pipe.Timing
+	n := float64(tm.Frames)
+	b.ReportMetric(tm.Render.Seconds()*1000/n, "render-ms")
+	b.ReportMetric(tm.Truth.Seconds()*1000/n, "truth-ms")
+	b.ReportMetric(tm.Realism.Seconds()*1000/n, "realism-ms")
+	b.ReportMetric(tm.Camera.Seconds()*1000/n, "camera-ms")
+}
+
+func humanWorld(t testing.TB, height float64) (*model.Model, *model.World) {
+	spec := body.DefaultHuman()
+	k := height / spec.Height
+	spec.Height, spec.Mass = height, spec.Mass*k*k*k
+	m, err := model.New(body.Human(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m, model.NewWorld(m, true)
+}
+
+func TestSeesOwnBody(t *testing.T) {
+	m, w := humanWorld(t, 1.778)
+	e := NewEyes(DefaultScene(1), m, FastProfile(), 1)
+	var f *StereoFrame
+	for k := 0; k < 2; k++ {
+		ScriptedWalk(w, 0.6+0.05*float64(k), 1)
+		f = e.Step(w, 0.6+0.05*float64(k))
+	}
+	links := map[int16]int{}
+	tracked := 0
+	for k, p := range f.L.Part {
+		id := f.L.ID[k]
+		self := id > 0 && e.Scene.Objects[id-1].Self
+		if (p >= 0) != self {
+			t.Fatalf("pixel %d: part %d but object %d self=%v", k, p, id, self)
+		}
+		if p >= 0 {
+			links[p]++
+			if e.Scene.Objects[id-1].Link != int(p) {
+				t.Fatalf("pixel %d: part %d on object riding link %d", k, p, e.Scene.Objects[id-1].Link)
+			}
+			if f.BackL[k].Valid {
+				tracked++
+			}
+		}
+	}
+	t.Logf("own links in view (link: pixels): %v, %d tracked by flow", links, tracked)
+	if len(links) < 2 {
+		t.Fatalf("looking down should show several own links, saw %v", links)
+	}
+	if tracked == 0 {
+		t.Fatal("no flow on the body")
+	}
+}
+
+func TestEyeTokenScalesWithBody(t *testing.T) {
+	tok := func(height float64) EyeToken {
+		m, w := humanWorld(t, height)
+		r := FastProfile().Rig
+		r.Baseline *= height / 1.778 // a scaled-down robot gets scaled-down eyes
+		return FindHead(m).Token(r, w)
+	}
+	a, b := tok(1.778), tok(0.9)
+	va, vb := a.Vector(), b.Vector()
+	for i := range va {
+		if math.Abs(va[i]-vb[i]) > 0.03*math.Max(1, math.Abs(va[i])) {
+			t.Fatalf("token feature %d differs with body size: %.4f vs %.4f\n%+v\n%+v", i, va[i], vb[i], a, b)
+		}
+	}
+	if a.Height < 0.8 || a.MaxDepth <= 0 {
+		t.Fatalf("token %+v", a)
+	}
+}
+
+func TestBatchThreadsAndReset(t *testing.T) {
+	m, _ := humanWorld(t, 1.778)
+	ws := make([]*model.World, 4)
+	ts := make([]float64, 4)
+	for i := range ws {
+		ws[i] = model.NewWorld(m, true)
+	}
+	run := func(threads int) [][]RGB {
+		b := NewBatch(4, DefaultScene(1), m, FastProfile(), threads, 7)
+		var out [][]RGB
+		for k := 0; k < 3; k++ {
+			for i := range ws {
+				ts[i] = 0.05*float64(k) + 0.3*float64(i)
+				ScriptedWalk(ws[i], ts[i], 0.5)
+			}
+			fs := b.Step(ws, ts)
+			if k == 2 {
+				for _, f := range fs {
+					out = append(out, append([]RGB(nil), f.OutL...))
+				}
+				b.Envs[0].Reset()
+				if f := b.Envs[0].Step(ws[0], ts[0]+0.05); !f.First {
+					t.Fatal("frame after Reset is not marked first")
+				}
+			}
+		}
+		return out
+	}
+	a, c := run(1), run(3)
+	for i := range a {
+		for k := range a[i] {
+			if a[i][k] != c[i][k] {
+				t.Fatalf("env %d differs between 1 and 3 threads at pixel %d", i, k)
+			}
+		}
+	}
+}

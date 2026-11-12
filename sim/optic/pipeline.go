@@ -17,6 +17,7 @@ type StereoFrame struct {
 	RadL, RadR       []RGB // realism stage (linear radiance)
 	OutL, OutR       []RGB // camera output (sRGB)
 	First            bool
+	Token            EyeToken // set by Eyes.Step
 }
 
 func newStereoFrame(w, h int) *StereoFrame {
@@ -43,6 +44,7 @@ type Pipeline struct {
 
 	r         Renderer
 	cur, prev *StereoFrame
+	n         int // frames since Reset
 }
 
 // NewPipeline sets up the default realism and camera for a rig.
@@ -57,7 +59,8 @@ func NewPipeline(s *Scene, rig Rig, seed int64) *Pipeline {
 func (p *Pipeline) Step(h geom.M3, eye geom.V3, t float64) *StereoFrame {
 	p.cur, p.prev = p.prev, p.cur
 	f, pf := p.cur, p.prev
-	first := p.Timing.Frames == 0
+	first := p.n == 0
+	p.n++
 	f.First = first
 
 	t0 := time.Now()
@@ -97,8 +100,17 @@ func (p *Pipeline) Step(h geom.M3, eye geom.V3, t float64) *StereoFrame {
 
 // Prev is the frame before the last Step (nil before the second step).
 func (p *Pipeline) Prev() *StereoFrame {
-	if p.Timing.Frames < 2 {
+	if p.n < 2 {
 		return nil
 	}
 	return p.prev
+}
+
+// Reset forgets the temporal state: the next frame has no flow history
+// and auto-exposure re-meters.
+func (p *Pipeline) Reset() {
+	p.n = 0
+	if p.Camera != nil {
+		p.Camera.Exp = Exposure{}
+	}
 }

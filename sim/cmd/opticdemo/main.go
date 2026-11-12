@@ -18,7 +18,6 @@ import (
 	"runtime"
 
 	"mars/sim/body"
-	"mars/sim/geom"
 	"mars/sim/model"
 	"mars/sim/optic"
 )
@@ -32,6 +31,8 @@ func main() {
 	h := flag.Int("h", 96, "height per eye")
 	seed := flag.Int64("seed", 1, "scene and sensor seed")
 	scale := flag.Int("scale", 2, "GIF pixel scale")
+	fast := flag.Bool("fast", false, "fast RL-loop profile (64×48, light realism and camera); no images unless -images")
+	images := flag.Bool("images", true, "write the GIF and still")
 	flag.Parse()
 	runtime.GOMAXPROCS(2)
 
@@ -44,11 +45,18 @@ func main() {
 		log.Fatal(err)
 	}
 	wd := model.NewWorld(m, true)
-	head := optic.FindHead(m)
 	scene := optic.DefaultScene(*seed)
-	rig := optic.DefaultRig()
-	rig.W, rig.H = *w, *h
-	pipe := optic.NewPipeline(scene, rig, *seed)
+	prof := optic.QualityProfile()
+	prof.Rig.W, prof.Rig.H = *w, *h
+	if *fast {
+		prof = optic.FastProfile()
+		if !isSet("images") {
+			*images = false
+		}
+	}
+	rig := prof.Rig
+	eyes := optic.NewEyes(scene, m, prof, *seed)
+	pipe := eyes.Pipe
 	pn := func(img []optic.RGB) optic.Panel { return optic.Panel{Img: img, W: rig.W, H: rig.H} }
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)
@@ -71,9 +79,10 @@ func main() {
 	dt := 1 / *fps
 	for i := 0; i < *frames; i++ {
 		t := float64(i) * dt
-		walk(wd, t)
-		hr, eye := head.HeadPose(wd)
-		f := pipe.Step(hr, eye, t)
+		// Walk, then look down at the feet and hands for the last third.
+		look := math.Max(0, math.Min(1, 3*float64(i)/float64(*frames)-2))
+		optic.ScriptedWalk(wd, t, look)
+		f := eyes.Step(wd, t)
 		clean := optic.Display(f.L.RGB, dispExp)
 		real := optic.Display(f.RadL, dispExp)
 		naiveLin := append([]optic.RGB(nil), f.RadL...)
@@ -153,6 +162,9 @@ func main() {
 				{pn(optic.DepthImage(f.L)), pn(optic.IDImage(f.L)), pn(optic.FlowImage(f.BackL, 3)),
 					pn(optic.DisparityImage(gt, float32(maxD))), pn(optic.DisparityImage(orBlank(bmOut, gt), float32(maxD)))},
 			}
+			if !*images {
+				continue
+			}
 			if err := optic.SavePNG(filepath.Join(*out, "still.png"), optic.Sheet(still, 3)); err != nil {
 				log.Fatal(err)
 			}
@@ -175,8 +187,10 @@ func main() {
 		}
 		floor = optic.Flicker(a, b, still, last.L)
 	}
-	if err := optic.SaveGIF(filepath.Join(*out, "stereo.gif"), gif, int(math.Round(100/(*fps)))); err != nil {
-		log.Fatal(err)
+	if *images {
+		if err := optic.SaveGIF(filepath.Join(*out, "stereo.gif"), gif, int(math.Round(100/(*fps)))); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	tm := pipe.Timing
@@ -205,7 +219,9 @@ func main() {
 		}
 	}
 	fmt.Printf("appearance vectors (%d-d): mean cosine within a kind %.2f, across kinds %.2f\n", scene.AppDim, within/nw, across/na)
-	fmt.Printf("wrote %s and %s\n", filepath.Join(*out, "stereo.gif"), filepath.Join(*out, "still.png"))
+	if *images {
+		fmt.Printf("wrote %s and %s\n", filepath.Join(*out, "stereo.gif"), filepath.Join(*out, "still.png"))
+	}
 }
 
 func orBlank(a, b []float32) []float32 {
@@ -215,21 +231,8 @@ func orBlank(a, b []float32) []float32 {
 	return b
 }
 
-// walk poses the robot kinematically on a scripted walk: forward at
-// 0.6 m/s, turning slowly left, with step bob, side sway and trunk roll,
-// leaning forward so the eyes see the floor ahead.
-func walk(w *model.World, t float64) {
-	step := 2 * math.Pi * 1.8 * t
-	yaw := 0.12 * t
-	lean := 0.14 + 0.02*math.Sin(2*step)
-	roll := 0.03 * math.Sin(step)
-	r := geom.AxisAngle(geom.V3{0, 1, 0}, yaw).
-		Mul(geom.AxisAngle(geom.V3{0, 0, 1}, -lean)).
-		Mul(geom.AxisAngle(geom.V3{1, 0, 0}, roll))
-	fwd := geom.V3{math.Cos(yaw), 0, -math.Sin(yaw)}
-	side := geom.V3{math.Sin(yaw), 0, math.Cos(yaw)}
-	p := fwd.Scale(0.6 * t).Add(side.Scale(0.03 * math.Sin(step)))
-	p[1] = w.StandH() - 0.02 + 0.02*math.Cos(2*step)
-	w.Base.R, w.Base.P = r, p
-	w.Refresh()
+func isSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
 }

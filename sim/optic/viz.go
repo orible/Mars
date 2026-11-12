@@ -135,3 +135,17 @@ func DisparityImage(d []float32, maxD float32) []RGB {
 	}
 	return out
 }
+
+// PartImage colours the robot's own links (hashed colour per link) and
+// leaves everything else black.
+func PartImage(f *Frame) []RGB {
+	out := make([]RGB, len(f.Part))
+	for k, l := range f.Part {
+		if l < 0 {
+			continue
+		}
+		h := uint32(l+1) * 2246822519
+		out[k] = RGB{0.3 + 0.7*float32(h&255)/255, 0.3 + 0.7*float32(h>>8&255)/255, 0.3 + 0.7*float32(h>>16&255)/255}
+	}
+	return out
+}

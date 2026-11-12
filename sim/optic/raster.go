@@ -30,9 +30,12 @@ type Frame struct {
 	// stereo correspondence for every pixel.
 	Local  [][3]float32
 	Normal [][3]float32 // world surface normal
-	UV     [][2]float32
-	LOD    []float32
-	Poses  []Pose // every object's pose at render time
+	// Part is the robot's own link seen at each pixel, −1 for anything
+	// that is not the robot.
+	Part  []int16
+	UV    [][2]float32
+	LOD   []float32
+	Poses []Pose // every object's pose at render time
 }
 
 // NewFrame allocates a w×h frame.
@@ -40,7 +43,7 @@ func NewFrame(w, h int) *Frame {
 	n := w * h
 	return &Frame{W: w, H: h, RGB: make([]RGB, n), Albedo: make([]RGB, n), Depth: make([]float32, n),
 		ID: make([]uint16, n), Local: make([][3]float32, n), Normal: make([][3]float32, n),
-		UV: make([][2]float32, n), LOD: make([]float32, n)}
+		UV: make([][2]float32, n), LOD: make([]float32, n), Part: make([]int16, n)}
 }
 
 // cv is a clip-space vertex: camera coordinates plus attributes.
@@ -213,6 +216,7 @@ func shade(s *Scene, f *Frame) {
 		for px := 0; px < f.W; px++ {
 			k := py*f.W + px
 			id := f.ID[k]
+			f.Part[k] = -1
 			if id == 0 {
 				d := cam.Ray(float64(px)+0.5, float64(py)+0.5).Unit()
 				f.Local[k] = [3]float32{float32(d[0]), float32(d[1]), float32(d[2])}
@@ -222,6 +226,9 @@ func shade(s *Scene, f *Frame) {
 				continue
 			}
 			o := s.Objects[id-1]
+			if o.Self {
+				f.Part[k] = int16(o.Link)
+			}
 			n := f.Normal[k]
 			l := float32(math.Sqrt(float64(n[0]*n[0] + n[1]*n[1] + n[2]*n[2])))
 			if l > 0 {
