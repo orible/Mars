@@ -205,3 +205,10 @@ The sim server runs at real time so the view is watchable. Add `-speed 4` to fas
 - Physics: the mass matrix uses the composite rigid body algorithm (checked against Newton–Euler). The human body costs about 0.35 s of CPU per simulated second on one core. Floor, joint-stop and cylinder end-stop stiffness grow with body mass.
 - Not modelled: leg self-collision.
 - Next: walk to commanded targets, the Phase 1 exit criterion.
+
+### Phase 2 (suspended)
+
+Work for after Phase 1 is kept on its own branches and is not part of Phase 1 training or this branch:
+
+- `scenario-worlds`: terrain test worlds (stairs, octave-noise ground, slopes, ramps, scattered objects) with observer views.
+- `claude/optic-sim-981970`: simulated stereo vision (tiny renderer, ground truth, consistent realism stage, the robot's own body in view, eye token), meant to learn to connect camera input with the body bus.

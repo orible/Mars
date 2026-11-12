@@ -171,6 +171,9 @@ func main() {
 		*logPath = filepath.Join("runs", filepath.Base(strings.TrimSuffix(ecfg.Name, ".json"))+".csv")
 	}
 	log.Printf("scenario %q: %s", ecfg.Name, ecfg.Description)
+	// A scenario with a harness keeps the option to bring it back, even
+	// when a resumed run had faded it to zero.
+	harnessed := ecfg.Assist > 0
 	if *assist >= 0 {
 		ecfg.Assist = *assist
 	}
@@ -212,7 +215,8 @@ func main() {
 		log.Fatal(err)
 	}
 	// A log written with different columns is moved aside, not appended to.
-	if old, err := os.ReadFile(*logPath); err == nil && len(old) > 0 && !strings.HasPrefix(string(old), csvHeader+"\n") {
+	// (A log checked out by git on Windows may end its lines in \r\n.)
+	if old, err := os.ReadFile(*logPath); err == nil && len(old) > 0 && strings.TrimRight(strings.SplitN(string(old), "\n", 2)[0], "\r") != csvHeader {
 		aside := strings.TrimSuffix(*logPath, ".csv") + time.Now().Format("-20060102-150405") + ".csv"
 		if err := os.Rename(*logPath, aside); err != nil {
 			log.Fatal(err)
@@ -231,7 +235,7 @@ func main() {
 	log.Printf("training %d envs × %d steps (%.2f s of robot time each) per iteration; %.0f%% random bodies; writing %s and %s",
 		cfg.Envs, cfg.Steps, float64(cfg.Steps)*env.PolicyDt, 100*ecfg.RandomBodyFrac, *out, *logPath)
 	start := time.Now()
-	var heldEps, heldFalls, downEps, upEps, hfEps, hfUp []int
+	var heldEps, heldFalls, downEps, upEps, hfEps, hfUp, soloEps, soloFalls []int
 	for i := 0; i < *iters; i++ {
 		s := tr.Iterate()
 		fmt.Fprintf(csv, "%d,%d,%d,%d,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%d,%.2f,%.2f,%.3f,%d,%d,%.3f,%d,%d,%d,%.3f,%d,%d,%.5f,%.2e\n",
@@ -301,7 +305,28 @@ func main() {
 		for k := range hfEps {
 			hd, hu = hd+hfEps[k], hu+hfUp[k]
 		}
-		if ecfg.AssistFloor && level > 0 && len(hfEps) == 20 && hd >= 20 {
+		// Unheld standing episodes: the real ability. Fading the harness
+		// on held falls alone once took it from 0.84 to 0 in 100
+		// iterations while 85% of unheld episodes still fell, and at 0 it
+		// could never come back. Below 0.3 it now fades only while most
+		// unheld episodes stay up, and it returns if they start falling.
+		soloEps, soloFalls = append(soloEps, s.SoloEpisodes), append(soloFalls, s.SoloFalls)
+		if len(soloEps) > 20 {
+			soloEps, soloFalls = soloEps[1:], soloFalls[1:]
+		}
+		se, sf := 0, 0
+		for k := range soloEps {
+			se, sf = se+soloEps[k], sf+soloFalls[k]
+		}
+		soloRate := -1.0 // unknown until 20 iterations hold ≥ 20 unheld episodes
+		if len(soloEps) == 20 && se >= 20 {
+			soloRate = float64(sf) / float64(se)
+		}
+		soloOK := soloRate >= 0 && soloRate < 0.5
+		if harnessed && !ecfg.AssistFloor && level < 0.3 && soloRate > 0.6 {
+			level = math.Min(0.3, level+0.02)
+			tr.SetAssist(level)
+		} else if ecfg.AssistFloor && level > 0 && len(hfEps) == 20 && hd >= 20 {
 			rate := float64(hu) / float64(hd)
 			switch {
 			case rate > 0.6:
@@ -313,7 +338,7 @@ func main() {
 		} else if level > 0 && len(heldEps) == 20 && eps >= 20 {
 			rate := float64(falls) / float64(eps)
 			switch {
-			case rate < 0.15:
+			case rate < 0.15 && (level > 0.3 || soloOK):
 				level = math.Max(0, level-0.01)
 			case rate > 0.4:
 				level = math.Min(1, level+0.01)
