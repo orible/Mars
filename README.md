@@ -22,6 +22,8 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 | `sim/ppo` | PPO with parallel rollouts and gradients, a left–right symmetry loss and a learning rate that follows the KL divergence |
 | `sim/cmd/train` | Trains a scenario and writes `checkpoints/policy.json` every iteration |
 | `sim/cmd/mocapref` | Turns motion capture (CMU ASF/AMC) into human motion references |
+| `sim/optic` | Simulated vision: a tiny stereo software rasteriser, exact ground truth per frame (depth, segmentation, flow, disparity, appearance vectors), the realism translator and a procedural camera model, with consistency metrics |
+| `sim/cmd/opticdemo` | Renders a stereo walk through the optic scene, writes `docs/optic/stereo.gif` and `still.png`, prints speed and consistency numbers |
 | `training` | Snapshot of the training data (checkpoints and run logs) that git carries between machines |
 | `sim/cmd/simserver` | Runs the sim, hot-reloads the body spec and the policy checkpoint, streams frames on `ws://localhost:8080/ws` |
 | `sim/bodies` | Body specs; edit these as hardware measurements come in |
@@ -197,6 +199,90 @@ Floors and feet: each episode of a built-in scenario draws a floor with bumps up
 How it learns: inputs are normalised by running statistics stored in the checkpoint. The critic also sees what only the simulator knows: true velocity and height, friction, harness and time left. A symmetry loss (`-symmetry`, default 0.5) asks the policy to command the mirror image of every situation the mirror way, so a skill learned on one side carries to the other. The learning rate rises and falls to keep each update's KL divergence near 0.01. The training log adds `lr` and `sym` columns. `-embed` and `-hidden` size a new network (default 64 and 128). The trainer has no real-time clock: every environment runs on its own goroutine, flat out across all cores. On a 6-core i5 that is about 18× real time during rollouts and about 11× including the network updates.
 
 The sim server runs at real time so the view is watchable. Add `-speed 4` to fast-forward, or `-speed 0` to run as fast as one core allows. Add `-push 2` to push the robot sideways every 2 s on average, as in training.
+
+## Vision (optic data source)
+
+The robot's eyes are simulated so that an optic learner can be trained offline on frames whose ground truth comes free from the sim. It is all Go and runs on the CPU, single-threaded per pipeline; to generate datasets, run one pipeline per core. Nothing in it is text: objects have ids in the buffers and appearance vectors, never names.
+
+```powershell
+cd sim; go run ./cmd/opticdemo            # writes ../docs/optic/stereo.gif and still.png, prints the numbers below
+```
+
+![stereo demo](docs/optic/stereo.gif)
+
+The top row shows the clean left render and the camera output for the left and right eyes. The bottom row shows depth, segmentation and exact backward flow. `still.png` also shows the realism stage, and the ground-truth disparity next to the block-matched disparity.
+
+**1. Stereo renderer.** Two parallel (rectified) pinhole cameras sit 6.5 cm apart in the head. Each renders 128×96 with a 90° horizontal field of view (set in `optic.Rig`). The body has no neck, so the head is rigid on the chest:
+
+- `optic.FindHead` finds the head on any body: the link that carries the highest contact point, with the eyes 6.4 % of standing height below it.
+- `HeadPose` gives the eye pose from a `model.World`.
+- `HeadAngles` returns the middleware input: pitch and roll against gravity, and yaw relative to the pelvis heading.
+- `HeadingRotation(pitch, yaw, roll)` turns eye-frame directions into the heading frame.
+
+The rasteriser uses edge functions, clips at the near plane, interpolates attributes with perspective correction and picks a mip level per pixel. It textures only the visible pixels (deferred texturing). The scene (`optic.DefaultScene`) is a brick-walled room with a tiled floor, pairs of near-identical crates, barrels and pillars, a dotted drum, a swinging door and a sliding box, all with baked procedural textures.
+
+**2. Ground truth.** Each `optic.Frame` carries:
+
+- depth along the view axis
+- object id (0 = sky)
+- the visible surface point in its object's frame
+- the world normal and the albedo
+- every object's pose
+
+`optic.Correspond(src, dst, …)` moves each source pixel's surface point with its object to the destination time, projects it into the destination camera and checks for occlusion. The same call gives exact optical flow (same eye at another time, covering both ego-motion and object motion) and exact stereo correspondence (the other eye). Stereo disparity is also `F·B/depth`. A disparity error δ is a depth error of `depth²·δ/(F·B)`, so the sense sharpens with the square of approach. Each object has a fixed 32-d unit appearance vector. Objects of one kind share a random prototype: the mean cosine is 0.91 within a kind and 0.01 across kinds.
+
+**3. Realism translator.** `optic.Realism` is an img2img stage conditioned on the G-buffer. It is procedural rather than learned: there is no real-camera data here to learn from, and the VM has no GPU. It re-textures and re-lights the clean render with:
+
+- albedo blotches, grime and tint drift
+- soft sun shadows from fixed sample directions
+- contact occlusion around footprints and at object bases
+- sky and floor bounce light
+- glossy highlights
+
+Every random detail is a function of the surface point in its object's frame, and every lighting term is a function of world geometry. So a surface point gets the same value in the next frame and in the other eye: the output is consistent by construction. The stage never resamples the image, so it cannot move an edge. Only the specular term depends on the viewpoint, as it does on a real camera.
+
+`optic.Stabiliser` is the warp-and-condition alternative, for a stage whose output changes randomly from frame to frame (such as a future learned network). It blends each pixel with the previous output, warped along the exact backward flow.
+
+**4. Camera.** `optic.Stereo` is a synced pair of `optic.Sensor`s. Each sensor applies:
+
+- motion blur and rolling shutter, sampled along the exact flow
+- lateral chromatic aberration, PSF blur and vignetting
+- auto-exposure shared by both eyes, which adapts and hunts slowly
+- a per-sensor white-balance error and fixed-pattern noise (PRNU, DSNU)
+- photon shot noise that rises with gain, read noise and a 10-bit ADC
+- a filmic tone curve with sRGB encoding, and sharpening
+- JPEG's lossy steps: 4:2:0 chroma and 8×8 DCT quantisation at quality 70
+
+**Consistency metrics** (`sim/optic/metrics.go`):
+
+- **Flicker:** the mean absolute luma difference (0–255) between frame t and frame t−1 warped along the exact backward flow. It counts only pixels visible in both frames and away from silhouettes. The clean render's own score is the resampling floor.
+- **Disparity error:** a plain 7×7 zero-mean SAD block matcher runs on each stereo pair and is compared with ground-truth disparity on textured pixels that both eyes see. It reports the mean absolute error and the fraction of pixels off by more than 1 px. If the two eyes were translated inconsistently, this error would rise.
+- **Edge drift:** at geometric edges (silhouettes and creases from the ground truth), the luma profile across the edge in the clean image is matched to the translated image by normalised cross-correlation. The best shift, averaged over edges, is the drift in pixels. It is measured normal to the edge, so a 1 px horizontal shift of the whole image reads about 0.64.
+
+`opticdemo` renders 36 stereo frames of a scripted walk at 20 fps. The timings were taken with `GOMAXPROCS=2` while a training run was using most of the VM's CPU, so they are upper bounds:
+
+| Stage | ms per stereo frame |
+| --- | --- |
+| Render, both eyes | 6–8 |
+| Ground truth (flow for both eyes, stereo) | 2.5 |
+| Realism, both eyes | 18–25 |
+| Camera, both eyes | 16–22 |
+
+| Metric | Clean | Realism | Camera output | Naive per-frame translator | Naive + stabiliser |
+| --- | --- | --- | --- | --- | --- |
+| Flicker (0–255) | 1.03 | 1.50 | 3.03 (sensor-noise floor 2.81) | 9.58 | 1.63 |
+| Disparity MAE / >1 px | 0.36 px / 3 % | 0.28 px / 2 % | 0.40 px / 5 % | 0.59 px / 11 % | n/a |
+| Edge drift | n/a | 0.22 px (0.02 without cast shadows) | 0.35 px | 0.26 px | n/a |
+
+The naive baseline is what an unconditioned per-frame img2img net does: it draws screen-space detail afresh for every frame and every eye. The metrics catch it: flicker rises about 6× and disparity error about 2× (the share of pixels off by more than 1 px about 4×). The stabiliser removes most of its flicker. Nearly all of the realism stage's edge drift comes from cast shadows. Their boundaries form new edges beside contact edges, and the profile match partly reads these as movement. The material and shading terms alone drift 0.02 px.
+
+Still weak:
+
+- **Realism is procedural.** It has no learned prior from real cameras: no reflections, no interreflection beyond a constant bounce, and no real material statistics. A learned version needs real camera footage or a pretrained model, which means a download to agree first.
+- **No anti-aliasing** beyond the lens PSF, so silhouettes in the clean render are jagged at 128×96.
+- **Rolling shutter and motion blur are approximate.** They shift the rendered frame along its flow (one flow vector per pixel) instead of re-rendering each row. The ground truth is for the frame-centre time, so in fast motion the labels on the camera output are off by the rolling-shutter shift.
+- **Realism and camera are the slow stages,** about 3× the render. Both are plain scalar Go and could be vectorised or run at half resolution if dataset generation needs it.
+- **Simple shapes.** Objects are convex boxes and prisms, and shadows use their bounding boxes, so cylinders cast box shadows.
 
 ## Status
 
