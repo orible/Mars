@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -93,7 +94,20 @@ func main() {
 	flag.Float64Var(&cfg.Symmetry, "symmetry", cfg.Symmetry, "weight of the left–right symmetry loss (0 = off)")
 	noSensors := flag.Bool("no-foot-sensors", false, "leave the sole pads and tendon sensors out (to compare)")
 	rough := flag.Float64("rough-floor", -1, "largest floor bump in m (default: the scenario's; 0 = flat)")
+	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "goroutines computing gradients (default: logical CPUs; physical cores can be faster)")
+	flag.IntVar(&cfg.Epochs, "epochs", cfg.Epochs, "passes over each batch per iteration")
+	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile here (go tool pprof) to see where training time goes")
 	flag.Parse()
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatal(err)
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	base, err := body.Load(*bodyPath)
 	if err != nil {
