@@ -203,6 +203,8 @@ The sim server runs at real time so the view is watchable. Add `-speed 4` to fas
 
 ## Vision (optic)
 
+> **Phase 2, suspended.** This work is parked until Phase 1 is done (balance, get up, walk to commanded targets). It lives only on this branch and is not merged into the Phase 1 branch.
+
 The robot's eyes are simulated so that vision can learn to connect camera input with the body bus. The encoder is meant to train inside the RL loop alongside the body, so the default profile is sized for throughput. Ground truth comes free from the sim and doubles as auxiliary training signals (depth, flow, segmentation, own body parts). It is all Go and runs on the CPU. Nothing in it is text: objects have ids in the buffers and appearance vectors, never names.
 
 ```powershell
