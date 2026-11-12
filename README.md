@@ -30,14 +30,14 @@ Simulation-first stack for a hydraulic humanoid: a full-size body (5 ft 10 in, 2
 
 ## Set up
 
-Requires Go 1.22+ and the .NET 10 SDK. The setup script checks for them, builds everything, and restores the carried training data on a new machine. It's safe to run again.
+Requires Go 1.22+ and the .NET 10 SDK. Blender and Python 3 are optional and only needed to edit the body in Blender. The setup script checks for all of them and builds everything. When Blender is there, it installs and enables the body-editing add-on (re-run setup after changing the add-on). It also restores the carried training data on a new machine. It's safe to run again.
 
 ```powershell
-.\setup.ps1            # Windows; add -Install to install Go/.NET with winget, -Test to run the tests
+.\setup.ps1            # Windows; -Install installs Go/.NET/Blender/Python with winget, -Test runs the Go and add-on tests
 ```
 
 ```bash
-./setup.sh             # macOS/Linux; --install uses Homebrew, --test runs the tests
+./setup.sh             # macOS/Linux; --install uses Homebrew (Go, .NET, Blender, Python), --test runs the Go and add-on tests
 ```
 
 To carry training to another machine, snapshot it into `training/` and commit:
@@ -85,7 +85,7 @@ The old 0.6 m, 6 kg robot is kept as `bodies/biped-small.json`.
 
 `tools/blender/mars_body.py` is a Blender 4.x add-on that turns the spec into something you can see and drag around. It's good for catching misplaced cylinder pins (like hip-yaw bases outside the pelvis) and for shaping collision capsules.
 
-1. Install it: Edit › Preferences › Add-ons, open the ⌄ menu at the top right, choose Install from Disk… (just Install… before Blender 4.2), pick `tools/blender/mars_body.py`, and tick "Mars body spec". It's tested on Blender 5.3 and written for 4.x and later.
+1. Install it: setup does this for you when Blender is installed (or run `blender -b -P tools/blender/install_addon.py`). To do it by hand: Edit › Preferences › Add-ons, open the ⌄ menu at the top right, choose Install from Disk… (just Install… before Blender 4.2), pick `tools/blender/mars_body.py`, and tick "Mars body spec". It's tested on Blender 5.3 and written for 4.x and later.
 2. Import with File › Import › Mars body spec (.json), and pick `sim/bodies/biped.json`. You get the body in its neutral pose (all joints at 0), standing on Blender's floor:
    - an armature with one bone per link (its head is the joint centre);
    - an empty for every cylinder pin (`cyl.knee_l.rod`), cable point, tendon point and contact point (`contact.heel_l.0`), each parented to its link's bone;

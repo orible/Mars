@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Sets up the Mars repo on macOS or Linux: checks Go and the .NET SDK,
-# downloads Go modules, builds the simulator tools and the observer, and
-# creates the training folders. Safe to run again; finished steps are
+# downloads Go modules, builds the simulator tools and the observer,
+# creates the training folders, and installs the Blender body-editing
+# add-on when Blender is there. Safe to run again; finished steps are
 # skipped.
 #
 #   ./setup.sh             check, build
-#   ./setup.sh --install   also install a missing Go / .NET SDK (Homebrew on macOS)
-#   ./setup.sh --test      also run the Go tests
+#   ./setup.sh --install   also install a missing Go / .NET SDK / Blender / Python (Homebrew on macOS)
+#   ./setup.sh --test      also run the Go tests and the Blender add-on's tests
 #   ./setup.sh --mocap     also download the CMU motion capture (about 12 MB) used
 #                          to re-extract the get-up references (already committed)
 #   ./setup.sh --save      snapshot training data (sim/checkpoints, sim/runs) into
@@ -134,6 +135,53 @@ fi
 step "Building the observer (Blazor)"
 dotnet build "$root/observer" --nologo -v q
 ok "built"
+
+# --- Blender body editing (optional) -------------------------------------------
+# Blender edits the body spec through tools/blender/mars_body.py; Python
+# runs the add-on's JSON and coordinate tests outside Blender. Neither is
+# needed to train or run the sim, so a missing one only warns.
+find_blender() {
+  command -v blender 2>/dev/null && return 0
+  for b in /Applications/Blender.app/Contents/MacOS/Blender "$HOME/Applications/Blender.app/Contents/MacOS/Blender" /snap/bin/blender; do
+    [ -x "$b" ] && { echo "$b"; return 0; }
+  done
+  return 1
+}
+
+step "Blender (body editing add-on)"
+blender="$(find_blender || true)"
+if [ -z "$blender" ] && [ "$install" = 1 ] && command -v brew >/dev/null 2>&1; then
+  step "Installing Blender with Homebrew"
+  brew install --cask blender || warn "Homebrew could not install Blender"
+  blender="$(find_blender || true)"
+fi
+if [ -n "$blender" ]; then
+  ok "$("$blender" --version 2>/dev/null | head -n1)"
+  if "$blender" -b -P "$root/tools/blender/install_addon.py" 2>/dev/null | grep 'MARS_ADDON enabled' >/dev/null; then
+    ok 'add-on "Mars body spec" installed and enabled (File > Import/Export, sidebar tab Mars)'
+  else
+    warn "could not enable the add-on; install tools/blender/mars_body.py from Blender's add-on preferences"
+  fi
+else
+  warn "Blender not found (optional, for editing the body): https://www.blender.org/download/$( [ "$install" = 1 ] || echo ', or on macOS run: ./setup.sh --install')"
+fi
+
+step "Python 3 (add-on tests outside Blender)"
+python="$(command -v python3 || true)"
+if [ -z "$python" ] && [ "$install" = 1 ] && brew_install "Python 3" python; then python="$(command -v python3 || true)"; fi
+if [ -n "$python" ]; then ok "$("$python" --version)"; else warn "Python 3 not found (optional)"; fi
+
+if [ "$test" = 1 ]; then
+  spec="$root/sim/bodies/biped.json" rt="$root/tools/blender/test_roundtrip.py"
+  if [ -n "$python" ]; then
+    step "Add-on tests (Python: JSON writer and coordinate mapping)"
+    "$python" "$rt" "$spec"
+  fi
+  if [ -n "$blender" ]; then
+    step "Add-on round trip (Blender: import, export, edit)"
+    "$blender" -b --factory-startup -P "$rt" -- "$spec" | grep -E '^(ok|FAIL|[0-9]+ failure)'
+  fi
+fi
 
 # --- Motion capture (optional) ------------------------------------------------
 if [ "$mocap" = 1 ]; then

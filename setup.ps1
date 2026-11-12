@@ -1,15 +1,18 @@
 <#
 .SYNOPSIS
   Sets up the Mars repo on Windows: checks Go and the .NET SDK, downloads
-  Go modules, builds the simulator tools and the observer, and creates the
-  training folders. Safe to run again; finished steps are skipped.
+  Go modules, builds the simulator tools and the observer, creates the
+  training folders, and installs the Blender body-editing add-on when
+  Blender is there. Safe to run again; finished steps are skipped.
 
 .PARAMETER Install
-  Install a missing Go or .NET SDK with winget (asks winget to accept the
-  package agreements for you).
+  Install a missing Go, .NET SDK, Blender or Python with winget (asks winget
+  to accept the package agreements for you). Blender and Python are
+  optional: they are only for editing the body in Blender.
 
 .PARAMETER Test
-  Run the Go tests after building.
+  Run the Go tests after building, and the Blender add-on's tests when
+  Python or Blender is there.
 
 .PARAMETER Mocap
   Download the CMU motion-capture recordings used to extract the get-up
@@ -186,6 +189,70 @@ if (Get-Process Mars.Observer -ErrorAction SilentlyContinue | Where-Object { $_.
     & dotnet build (Join-Path $root 'observer') --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw 'observer build failed' }
     Ok 'built'
+}
+
+# --- Blender body editing (optional) -------------------------------------------
+# Blender edits the body spec through tools/blender/mars_body.py; Python
+# runs the add-on's JSON and coordinate tests outside Blender. Neither is
+# needed to train or run the sim, so a missing one only warns.
+function Find-Blender {
+    $cmd = Get-Command blender -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $found = Get-ChildItem "$env:ProgramFiles\Blender Foundation\*\blender.exe" -ErrorAction SilentlyContinue |
+        Sort-Object { [version]($_.Directory.Name -replace '[^\d.]', '') } -Descending | Select-Object -First 1
+    if ($found) { return $found.FullName }
+    return $null
+}
+
+function Find-Python {
+    # Skip the Microsoft Store stub in WindowsApps: it only offers to install Python.
+    foreach ($name in 'python', 'python3') {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch 'WindowsApps' } | Select-Object -First 1
+        if ($cmd) { return $cmd.Source }
+    }
+    $found = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe", "$env:ProgramFiles\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if ($found) { return $found.FullName }
+    return $null
+}
+
+Step 'Blender (body editing add-on)'
+$blender = Find-Blender
+if (-not $blender -and $Install) {
+    Winget-Install 'BlenderFoundation.Blender' 'Blender'
+    $blender = Find-Blender
+}
+if ($blender) {
+    $v = (& $blender --version 2>$null | Select-Object -First 1)
+    Ok $v
+    $out = & $blender -b -P (Join-Path $root 'tools\blender\install_addon.py') | Select-String 'MARS_ADDON'
+    if ("$out" -match 'enabled') { Ok 'add-on "Mars body spec" installed and enabled (File > Import/Export, sidebar tab Mars)' }
+    else { Warn "could not enable the add-on ($out); install tools\blender\mars_body.py from Blender's add-on preferences" }
+} else {
+    Warn 'Blender not found (optional, for editing the body); install it or run: .\setup.ps1 -Install'
+}
+
+Step 'Python 3 (add-on tests outside Blender)'
+$python = Find-Python
+if (-not $python -and $Install) {
+    Winget-Install 'Python.Python.3.13' 'Python 3'
+    $python = Find-Python
+}
+if ($python) { Ok "$(& $python --version)" } else { Warn 'Python 3 not found (optional); install it or run: .\setup.ps1 -Install' }
+
+if ($Test) {
+    $spec = Join-Path $root 'sim\bodies\biped.json'
+    $rt = Join-Path $root 'tools\blender\test_roundtrip.py'
+    if ($python) {
+        Step 'Add-on tests (Python: JSON writer and coordinate mapping)'
+        & $python $rt $spec
+        if ($LASTEXITCODE -ne 0) { throw 'add-on tests failed (Python)' }
+    }
+    if ($blender) {
+        Step 'Add-on round trip (Blender: import, export, edit)'
+        & $blender -b --factory-startup -P $rt -- $spec | Select-String '^(ok|FAIL|\d+ failure)'
+        if ($LASTEXITCODE -ne 0) { throw 'add-on round trip failed (Blender)' }
+    }
 }
 
 # --- Motion capture (optional) ------------------------------------------------
