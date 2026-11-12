@@ -35,7 +35,7 @@ type Obs struct {
 	Tokens  [][]float64 // one per actuator
 	Parts   [][]float64 // one per body part
 	Sensors [][]float64 // one per sensor (may be none)
-	Global []float64
+	Global  []float64
 	// Priv holds privileged facts only the simulator knows (true
 	// velocity, height, friction, harness). Only the critic reads them,
 	// so the policy never depends on them.
@@ -177,6 +177,9 @@ type SetPolicy struct {
 	Sensor     MLP `json:"sensor"` // [sensor, global] -> sensor embedding
 	Phi        MLP `json:"phi"`    // [token, global, body shape, feel] -> embedding
 	Rho        MLP `json:"rho"`    // [embedding, context, global, body shape, feel] -> command
+	// Attn, if set, lets the actuator embeddings attend to each other
+	// before ρ reads them (ρ's pooled context stays the plain mean).
+	Attn *Attention `json:"attn,omitempty"`
 	// LogStd is the log of the exploration noise added to every command
 	// during training (one value shared by all actuators).
 	LogStd   []float64   `json:"logStd"`
@@ -251,6 +254,11 @@ func (p *SetPolicy) Check() error {
 	}
 	if p.Phi.Layers[0].In != p.TokenDim+p.GlobalDim+2*p.Embed || p.Part.Layers[0].In != p.PartDim+p.GlobalDim || p.Sensor.Layers[0].In != p.SensorDim+p.GlobalDim {
 		return fmt.Errorf("checkpoint layer sizes do not match its feature sizes")
+	}
+	if p.Attn != nil {
+		if err := p.Attn.check(p.Embed); err != nil {
+			return err
+		}
 	}
 	if len(p.LogStd) != 1 {
 		p.LogStd = []float64{DefaultLogStd}

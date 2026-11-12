@@ -1,5 +1,7 @@
 package policy
 
+import "math"
+
 // Activations is one forward pass laid out for inspection: every set's
 // normalised inputs, its per-token embeddings and their pooled mean, the
 // decoder's hidden layers per actuator, and the commands. It is read from
@@ -19,6 +21,14 @@ type Activations struct {
 	PhiHid    [][]float64 `json:"phiHid,omitempty"` // φ's last hidden layer per actuator
 	TokenEmb  [][]float64 `json:"tokenEmb"`         // tanh actuator embeddings
 	TokenPool []float64   `json:"tokenPool"`        // their mean: the body context
+
+	// Attention (if the policy has it): Attn[h][i][j] is how much actuator
+	// i listens to actuator j in head h (rows sum to 1), Mixed[i] is the
+	// embedding ρ reads (TokenEmb[i] plus what attention adds), AttnGain[i]
+	// the size of that addition relative to TokenEmb[i].
+	Attn     [][][]float64 `json:"attn,omitempty"`
+	Mixed    [][]float64   `json:"mixed,omitempty"`
+	AttnGain []float64     `json:"attnGain,omitempty"`
 
 	// RhoHid holds ρ's hidden layers per actuator: RhoHid[i][l] is
 	// actuator i's layer l after tanh.
@@ -48,6 +58,17 @@ func (p *SetPolicy) Activations(c *PolicyCache) *Activations {
 	a.Tokens, a.TokenEmb, a.TokenPool = inputs(e.phiActs), e.h, e.ctx
 	for _, ac := range e.phiActs {
 		a.PhiHid = append(a.PhiHid, ac[len(ac)-2])
+	}
+	if c.att != nil {
+		a.Attn, a.Mixed = c.att.alpha, c.att.out
+		for i, h := range e.h {
+			dz, hh := 0.0, 0.0
+			for j, v := range h {
+				d := c.att.out[i][j] - v
+				dz, hh = dz+d*d, hh+v*v
+			}
+			a.AttnGain = append(a.AttnGain, math.Sqrt(dz/math.Max(hh, 1e-12)))
+		}
 	}
 	for _, ac := range c.rho {
 		a.RhoHid = append(a.RhoHid, ac[1:len(ac)-1])

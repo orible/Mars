@@ -118,6 +118,8 @@ function draw(canvas, f) {
   const ls = net ? lanes(net) : [];
   let H = 84;
   for (const l of ls) H += 40 + ROW * (l.input.length + 1) + 18;
+  const attn = net && net.attn && net.attn[0];
+  if (attn) H += 60 + ROW * attn.length;
   H = Math.max(H, 220);
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth || W;
@@ -159,6 +161,7 @@ function draw(canvas, f) {
 
   let y = 84;
   for (const l of ls) y = drawLane(ctx, l, y, hov, { text, muted, accent, grid, std, net });
+  if (attn) drawAttn(ctx, net, attn, y, hov, { text, muted, accent, grid });
   drawTooltip(ctx, H);
 }
 
@@ -233,6 +236,43 @@ function drawLane(ctx, l, y, hov, c) {
     ctx.strokeRect(x - 0.5, y0 - 1.5, hov.cw + 1, (hov.stage === "rho" ? n * ROW : y - y0 + CELL) + 2);
   }
   return y + CELL + 22;
+}
+
+// Attention between cylinders (policies trained with -attn): row i is
+// cylinder i listening, column j the cylinder it hears, averaged over
+// heads; each row sums to 1, so an even spread is 1/n. The bar on the
+// right is how much attention changes that cylinder's embedding.
+function drawAttn(ctx, net, A, y, hov, c) {
+  const n = A.length, names = net.labels.tokens, cw = 13;
+  let top = 0;
+  for (const row of A) for (const v of row) top = Math.max(top, v);
+  ctx.font = "600 13px system-ui, sans-serif";
+  label(ctx, `Attention · ${n} cylinders`, X.name, y + 8, c.text);
+  ctx.font = "12px system-ui, sans-serif";
+  label(ctx, `row listens to column (mean over heads) · orange above an even ${pct(1 / n)}, blue below; strongest here ${pct(top)} · bar: how much it changes the row's embedding`, X.input, y + 8, c.muted);
+  y += 30;
+  const x0 = X.input, gx = x0 + n * cw + 16;
+  for (let i = 0; i < n; i++, y += ROW) {
+    const name = names[i] || "#" + i;
+    label(ctx, name.length > 22 ? name.slice(0, 21) + "…" : name, X.name, y + CELL / 2, c.muted);
+    for (let j = 0; j < n; j++) {
+      ctx.fillStyle = diverge(A[i][j] * n - 1, 1); // orange: above an even share, blue: below; 2× even is full
+      ctx.fillRect(x0 + j * cw, y, cw - 1, CELL);
+    }
+    hits.push({ lane: "attn", x: x0, y, w: n * cw, h: CELL, cw, tip: (j) => [
+      `${name} listens to ${names[j] || "#" + j}`, `weight ${pct(A[i][j])} (${(A[i][j] * n).toFixed(2)}× even)`] });
+    const g = (net.attnGain || [])[i] || 0;
+    ctx.fillStyle = c.accent;
+    ctx.fillRect(gx, y + 2, Math.min(1, g) * 120, CELL - 4);
+    ctx.fillStyle = c.grid;
+    ctx.fillRect(gx, y + CELL / 2 - 0.5, 120, 1);
+    hits.push({ x: gx, y, w: 120, h: CELL, tip: () => [
+      `${name} · attention's change to its embedding`, `${pct(g)} of the embedding's size`, "0% = attention not used yet (it starts switched off)"] });
+  }
+  if (hov && hov.lane === "attn") {
+    ctx.strokeStyle = c.text;
+    ctx.strokeRect(x0 + hov.j * cw - 0.5, y - n * ROW - 1.5, cw + 1, n * ROW + 2);
+  }
 }
 
 function drawRho(ctx, net, i, name, y, c) {

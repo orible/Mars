@@ -97,6 +97,9 @@ func main() {
 	flag.IntVar(&cfg.Workers, "workers", cfg.Workers, "goroutines computing gradients (default: logical CPUs; physical cores can be faster)")
 	flag.IntVar(&cfg.Epochs, "epochs", cfg.Epochs, "passes over each batch per iteration")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile here (go tool pprof) to see where training time goes")
+	attn := flag.Bool("attn", false, "let the cylinder tokens attend to each other before ρ (added to a resumed network without changing its outputs; a checkpoint that has it keeps it)")
+	attnHeads := flag.Int("attn-heads", 4, "attention heads (with -attn)")
+	attnDim := flag.Int("attn-dim", 8, "attention width per head (with -attn)")
 	flag.Parse()
 	if *cpuProfile != "" {
 		f, err := os.Create(*cpuProfile)
@@ -138,6 +141,10 @@ func main() {
 		}
 		pol.LogStd[0] = math.Max(ppo.MinLogStd, pol.LogStd[0]) // restore exploration if it had collapsed
 		log.Printf("resumed from %s (exploration σ %.2f)", *out, pol.Std())
+	}
+	if *attn && pol.Attn == nil {
+		pol.AddAttention(rng, *attnHeads, *attnDim)
+		log.Printf("added attention over the cylinder tokens (%d heads × %d); outputs unchanged until it trains", *attnHeads, *attnDim)
 	}
 	if pol.TokenDim != obs.TokenDim || pol.PartDim != obs.PartDim || pol.GlobalDim != obs.GlobalDim {
 		log.Fatalf("checkpoint features %d/%d/%d, simulator provides %d/%d/%d", pol.TokenDim, pol.PartDim, pol.GlobalDim, obs.TokenDim, obs.PartDim, obs.GlobalDim)

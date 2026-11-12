@@ -563,6 +563,22 @@ func (s *sim) net() *NetFrame {
 	r.Parts, r.PartEmb, r.Sensors, r.SensorEmb = round3s(a.Parts), round3s(a.PartEmb), round3s(a.Sensors), round3s(a.SensorEmb)
 	r.Tokens, r.PhiHid, r.TokenEmb = round3s(a.Tokens), nil, round3s(a.TokenEmb) // the view doesn't draw φ's hidden layer
 	r.Pre, r.Mu = round3(a.Pre), round3(a.Mu)
+	// Attention: the per-head weights averaged into one listener × heard
+	// matrix (sent as a single "head"), and how much it adds per cylinder.
+	r.Attn, r.Mixed, r.AttnGain = nil, nil, round3(a.AttnGain)
+	if len(a.Attn) > 0 {
+		n := len(a.Attn[0])
+		avg := make([][]float64, n)
+		for i := range avg {
+			avg[i] = make([]float64, n)
+			for _, head := range a.Attn {
+				for j, v := range head[i] {
+					avg[i][j] += v / float64(len(a.Attn))
+				}
+			}
+		}
+		r.Attn = [][][]float64{round3s(avg)}
+	}
 	r.RhoHid = make([][][]float64, len(a.RhoHid))
 	for i, h := range a.RhoHid {
 		r.RhoHid[i] = round3s(h)

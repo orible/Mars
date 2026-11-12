@@ -170,6 +170,8 @@ cd sim && go run ./cmd/train -scenario getup -iters 400
 cd sim && go run ./cmd/train -scenario life -resume
 ```
 
+With mean pooling alone, each cylinder only sees the average of the others. `-attn` adds attention between the cylinder tokens: each cylinder learns which others to listen to. It is added as a residual whose output starts at zero, so `-resume -attn` continues from an existing checkpoint with unchanged behaviour until training moves it. A checkpoint that has attention keeps it. `/net` shows who listens to whom. It costs about a quarter more per policy gradient (`go test ./policy -bench Policy`).
+
 Statistics go to `runs/<scenario>.csv`, and the checkpoint is rewritten after every iteration. Watch the latest weights while training runs; the server reloads the checkpoint whenever it changes:
 
 ```bash

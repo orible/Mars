@@ -310,7 +310,7 @@ func (p *SetPolicy) Std() float64 { return math.Exp(p.LogStd[0]) }
 // gradients, without input statistics).
 func (p *SetPolicy) Clone(zero bool) *SetPolicy {
 	c := &SetPolicy{ObsVersion: p.ObsVersion, TokenDim: p.TokenDim, PartDim: p.PartDim, SensorDim: p.SensorDim, GlobalDim: p.GlobalDim, Embed: p.Embed,
-		Part: p.Part.clone(zero), Sensor: p.Sensor.clone(zero), Phi: p.Phi.clone(zero), Rho: p.Rho.clone(zero), LogStd: []float64{0}}
+		Part: p.Part.clone(zero), Sensor: p.Sensor.clone(zero), Phi: p.Phi.clone(zero), Rho: p.Rho.clone(zero), Attn: p.Attn.clone(zero), LogStd: []float64{0}}
 	if !zero {
 		c.LogStd[0] = p.LogStd[0]
 		c.TokNorm, c.PartNorm, c.SensNorm, c.GloNorm = p.TokNorm.clone(), p.PartNorm.clone(), p.SensNorm.clone(), p.GloNorm.clone()
@@ -320,7 +320,8 @@ func (p *SetPolicy) Clone(zero bool) *SetPolicy {
 
 // Params lists every trainable array, in a fixed order shared by Clone.
 func (p *SetPolicy) Params() [][]float64 {
-	return append(append(append(append(p.Part.params(), p.Sensor.params()...), p.Phi.params()...), p.Rho.params()...), p.LogStd)
+	ps := append(append(append(append(p.Part.params(), p.Sensor.params()...), p.Phi.params()...), p.Rho.params()...), p.LogStd)
+	return append(ps, p.Attn.params()...) // last, so the order without attention is unchanged
 }
 
 // PolicyCache holds one forward pass for backpropagation.
@@ -328,7 +329,8 @@ type PolicyCache struct {
 	enc    *encoding
 	shared []float64 // [context, global, body shape]: ρ's input shared by every actuator
 	rho    [][][]float64
-	Mu  []float64 // mean command per actuator, in [-1, 1]
+	att    *attnPass // nil without attention
+	Mu     []float64 // mean command per actuator, in [-1, 1]
 }
 
 // Forward returns the mean command per actuator and a cache for Backward.
@@ -339,7 +341,12 @@ func (p *SetPolicy) Forward(o *Obs) *PolicyCache {
 	c := &PolicyCache{enc: enc, rho: make([][][]float64, len(enc.h)), Mu: make([]float64, len(enc.h))}
 	c.shared = concat(enc.ctx, enc.g2)
 	pre := p.Rho.sharedPre(p.Embed, c.shared)
-	for i, h := range enc.h {
+	hs := enc.h
+	if p.Attn != nil && len(hs) > 0 {
+		c.att = p.Attn.forward(hs)
+		hs = c.att.out
+	}
+	for i, h := range hs {
 		c.rho[i] = p.Rho.fwdWith(h, pre)
 		c.Mu[i] = math.Tanh(c.rho[i][len(c.rho[i])-1][0])
 	}
@@ -358,6 +365,9 @@ func (p *SetPolicy) Backward(c *PolicyCache, dMu []float64, g *SetPolicy) {
 		dh[i] = p.Rho.bwdWith(c.rho[i], []float64{dm}, &g.Rho, dpre)
 	}
 	ds := p.Rho.sharedBwd(E, c.shared, dpre, &g.Rho)
+	if c.att != nil {
+		dh = p.Attn.backward(c.att, dh, g.Attn)
+	}
 	c.enc.backward([]*MLP{&p.Part, &p.Sensor}, []*MLP{&g.Part, &g.Sensor}, &p.Phi, &g.Phi, E, dh, ds[:E], ds[E:])
 }
 
