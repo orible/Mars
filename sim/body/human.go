@@ -320,8 +320,22 @@ func buildHuman(s HumanSpec, rng *rand.Rand) Body {
 			at("toes_"+n, ankle.Add(geom.V3{mtpX + 0.025*k, sole + 0.004*k, 0}))}
 		tendons = append(tendons, Tendon{Name: "plantar_" + n, Path: fascia, Stiffness: 2e5 * M / 102.06, Damping: 300 * M / 102.06})
 
-		if s.HipYaw { // horizontal, front to back, 5 cm inside the yaw axis: its lever stays near 5 cm across the range
-			cyl("hip_yaw_"+n, at("pelvis", hip.Add(geom.V3{-0.20 * k, 0, -z * 0.05 * k})), at(mount, hip.Add(geom.V3{0.03 * k, 0, -z * 0.05 * k})), "hip_yaw_"+n, 80, 5)
+		if s.HipYaw {
+			// Horizontal, across the pelvis: from the front of the far side
+			// (inside the pelvis, which spans x −0.12k..0.10k) back to a
+			// lever behind the yaw axis on the hip bracket. Anchor search:
+			// covers 40° in to 45° out with a 74 mm stroke and a 38 mm
+			// minimum lever. The pelvis is too short front to back for a
+			// cylinder that stays on its own side, so left and right cross
+			// in the middle. In hardware stack them about 3 cm apart
+			// vertically (one above hip height, one below); moving both pins
+			// of a horizontal cylinder up or down by the same amount does not
+			// change its yaw lever. The sim keeps both at hip height so the
+			// body stays an exact mirror image (training relies on that), and
+			// cylinders do not collide in the sim.
+			// (It used to be mounted 20 cm behind the hip: 8 cm behind the
+			// pelvis, attached to nothing.)
+			cyl("hip_yaw_"+n, at("pelvis", hip.Add(geom.V3{0.085 * k, 0, -z * 0.21 * k})), at(mount, hip.Add(geom.V3{-0.045 * k, 0, -z * 0.025 * k})), "hip_yaw_"+n, 80, 5)
 		}
 		cyl("hip_pitch_"+n, at(mount, hip.Add(geom.V3{0.035 * sl, 0.05 * sl, 0})), at("thigh_"+n, hip.Add(geom.V3{0.07 * sl, -0.96 * th, 0})), "thigh_"+n, 300, 8)
 		if s.HipRoll {
