@@ -231,12 +231,22 @@ func main() {
 				d, u = d+downEps[k], u+upEps[k]
 			}
 			if len(downEps) == 20 && d >= 20 {
+				// After a step, judge the new level only on episodes
+				// started there: clear the windows so old successes at
+				// an easier level cannot push it on (they once carried
+				// it from 0.12 to 0.58 in 28 iterations, past what the
+				// policy could do).
 				rate := float64(u) / float64(d)
+				was := floorLevel
 				switch {
 				case rate > 0.5:
 					floorLevel = math.Min(1, floorLevel+0.02)
-				case rate < 0.1:
-					floorLevel = math.Max(0.05, floorLevel-0.01)
+				case rate < 0.2:
+					floorLevel = math.Max(0.05, floorLevel-0.02)
+				}
+				if floorLevel != was {
+					downEps, upEps = downEps[:0], upEps[:0]
+					hfEps, hfUp = hfEps[:0], hfUp[:0]
 				}
 				tr.SetStartLevel(floorLevel)
 			}
