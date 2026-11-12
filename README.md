@@ -85,7 +85,7 @@ The old 0.6 m, 6 kg robot is kept as `bodies/biped-small.json`.
 
 `tools/blender/mars_body.py` is a Blender 4.x add-on that turns the spec into something you can see and drag around. It's good for catching misplaced cylinder pins (like hip-yaw bases outside the pelvis) and for shaping collision capsules.
 
-1. Install it: Edit › Preferences › Add-ons › Install…, choose `tools/blender/mars_body.py`, then tick "Mars body spec".
+1. Install it: Edit › Preferences › Add-ons, open the ⌄ menu at the top right, choose Install from Disk… (just Install… before Blender 4.2), pick `tools/blender/mars_body.py`, and tick "Mars body spec". It's tested on Blender 5.3 and written for 4.x and later.
 2. Import with File › Import › Mars body spec (.json), and pick `sim/bodies/biped.json`. You get the body in its neutral pose (all joints at 0), standing on Blender's floor:
    - an armature with one bone per link (its head is the joint centre);
    - an empty for every cylinder pin (`cyl.knee_l.rod`), cable point, tendon point and contact point (`contact.heel_l.0`), each parented to its link's bone;
@@ -102,7 +102,7 @@ The old 0.6 m, 6 kg robot is kept as `bodies/biped-small.json`.
    - Move bones in Edit Mode to move joints. Whatever is parented to a bone moves with it.
 
    Pose the armature to check clearances through a joint's range. Export always reads the rest pose.
-4. Export with File › Export › Mars body spec (.json), which defaults to the imported file. Every point is written in its link's own frame. Everything the add-on doesn't edit (hydraulics, tendons, supply, cylinder sizes) is copied unchanged. A value that moved by less than 0.01 mm keeps its exact original number, so exporting with no edits reproduces the file byte for byte, and an edit changes only what you touched. A running `simserver` reloads the file within a second. If it rejects the spec (an overlapping capsule, or a cylinder that no longer fits its stroke), it logs why and keeps the previous body. Run `go run ./cmd/simserver -check` for the full reach report.
+4. Export with File › Export › Mars body spec (.json), which defaults to the imported file. Every point is written in its link's own frame. Everything the add-on doesn't edit (hydraulics, tendons, supply, cylinder sizes) is copied unchanged. Any number (each coordinate separately) that moved by less than 0.01 mm keeps its exact original value, so exporting with no edits reproduces the file byte for byte, and an edit changes only what you touched. A running `simserver` reloads the file within a second. If it rejects the spec (an overlapping capsule, or a cylinder that no longer fits its stroke), it logs why and keeps the previous body. Run `go run ./cmd/simserver -check` for the full reach report.
 
 Coordinates: the sim has X forward, Y up and Z to the robot's right. A Blender character faces −Y with Z up and its right side at −X, so sim (x, y, z) is Blender (−z, −x, y), and Blender (X, Y, Z) is sim (−Y, Z, −X). That's a rotation, not a mirror. Structural changes (adding links or cylinders, cylinder sizing) still go through `bodygen` or the JSON. Note that `bodygen` regenerates `biped.json` from the template and overwrites Blender edits.
 

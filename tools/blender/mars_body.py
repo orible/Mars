@@ -77,9 +77,10 @@ def _round6(x):
 
 
 def keep_vec(orig, new):
-    """orig unchanged if new is within KEEP_TOL of it everywhere, else new rounded to the micrometre."""
-    if isinstance(orig, list) and len(orig) == len(new) and all(abs(o - n) <= KEEP_TOL for o, n in zip(orig, new)):
-        return orig
+    """Each component of orig that new is within KEEP_TOL of stays exactly as it was; the rest are new, rounded to the micrometre."""
+    if isinstance(orig, list) and len(orig) == len(new):
+        out = [o if abs(o - n) <= KEEP_TOL else _round6(n) for o, n in zip(orig, new)]
+        return orig if out == orig else out
     return [_round6(x) for x in new]
 
 

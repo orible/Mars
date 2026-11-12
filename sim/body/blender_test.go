@@ -29,11 +29,12 @@ func f32(v geom.V3) geom.V3 {
 const keepTol = 1e-5
 
 func keep(orig, got geom.V3) geom.V3 {
-	if orig.Sub(got).Norm() <= keepTol {
-		return orig
-	}
 	for i := range got {
-		got[i] = math.Round(got[i]*1e6) / 1e6
+		if math.Abs(got[i]-orig[i]) <= keepTol {
+			got[i] = orig[i]
+		} else {
+			got[i] = math.Round(got[i]*1e6) / 1e6
+		}
 	}
 	return got
 }
@@ -149,6 +150,9 @@ func TestBlenderRoundTripKeepsEveryNumber(t *testing.T) {
 		case c.Name == "knee_l":
 			if d := got.Rod.Point.Sub(c.Rod.Point); d.Sub(geom.V3{0, 0, -0.01}).Norm() > 2e-6 {
 				t.Errorf("knee_l rod moved by %v, want [0 0 -0.01]", d)
+			}
+			if got.Rod.Point[0] != c.Rod.Point[0] || got.Rod.Point[1] != c.Rod.Point[1] {
+				t.Errorf("knee_l rod x, y rewritten: %v → %v", c.Rod.Point, got.Rod.Point)
 			}
 			if got.Base != c.Base {
 				t.Errorf("knee_l base moved")
