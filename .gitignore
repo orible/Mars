@@ -18,3 +18,4 @@ obj/
 
 # Downloaded motion capture (CMU); only extracted references are committed
 /sim/mocap/cmu-*/
+__pycache__/
